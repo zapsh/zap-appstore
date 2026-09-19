@@ -1,0 +1,108 @@
+name: wordpress
+title: WordPress
+version: ["6.8.2", "6.7.2"]
+category: webapps
+description: 最流行的 PHP 建站程序（博客 / 企业站 / CMS）。面板会自动准备好站点与专用数据库，脚本以站点 Linux 账号身份把程序装进站点根目录。
+tags: [wordpress, cms, blog, php]
+# 同一域名只能装一个，换域名重装算另一个实例
+allow_multiple_instances: 'yes'
+# 建站类包：装进用户站点目录，脚本降权为该站点的 Linux 账号（nologin）
+scope: site
+run_as: user
+# 普通用户也可安装（缺省仅 admin 可见可安装）
+roles: [admin, user]
+dependencies:
+  php: '>=7.4'
+# ── 面板侧编排 ──────────────────────────────────────────────
+# 降权脚本没有建站、建库的权限，也不该拿到数据库管理凭据。
+# 由面板在任务入队前准备好，再把连接信息注入脚本环境：
+#   SITE_ID SITE_DOMAIN SITE_ROOT SITE_OWNER SITE_LINUX_USER PHP_INSTANCE PHP_FPM_SOCK
+#   DB_NAME DB_USER DB_PASS DB_HOST DB_PORT DB_CHARSET DB_USER_HOST
+# 密码不进 options.env / info.yaml，只在脚本进程与 provision.json（0600）出现。
+provision:
+  site:
+    mode: create              # 站点不存在就按面板规则自动建；改 require 则要求先建站
+    domain_option: SITE_DOMAIN
+    rewrite: wordpress        # 伪静态预设
+  database:
+    name: wp                  # 实际库名 = 用户前缀 + wp（重名自动 wp_2…）
+    charset: utf8mb4
+scripts:
+  install: install.py
+  uninstall: uninstall.py
+  upgrade: upgrade.py
+options:
+  install:
+    intro: >-
+      WordPress will be installed into the site root of SITE_DOMAIN. The panel creates the
+      site (if missing) and a dedicated database + user for this instance, then passes the
+      connection info to the script through the environment, so no database password is ever
+      stored in the install options. If wp-cli is available the installer also runs
+      `wp core install`; otherwise open the site to finish the famous 5-minute install.
+    items:
+      - name: SITE_DOMAIN
+        label: 站点域名
+        type: string
+        required: true
+        placeholder: www.example.com
+        desc: 站点不存在时面板会自动创建（PHP 取面板默认版本，伪静态 wordpress）
+      - name: SITE_TITLE
+        label: 站点标题
+        type: string
+        default: 我的站点
+        desc: WordPress 后台「设置 → 常规」里的站点标题
+      - name: ADMIN_USER
+        label: 管理员账号
+        type: string
+        default: admin
+        required: true
+        desc: 后台登录用户名（不要再用默认的 admin，装完可在后台新建管理员后停用）
+      - name: ADMIN_EMAIL
+        label: 管理员邮箱
+        type: string
+        required: true
+        placeholder: you@example.com
+        desc: 用于找回密码与系统通知
+      - name: ADMIN_PASSWORD
+        label: 管理员密码
+        type: string
+        required: true
+        desc: 会记录在本次安装记录中，装完建议在「用户 → 个人资料」里改一次
+      - name: TABLE_PREFIX
+        label: 表前缀
+        type: string
+        default: wp_
+        desc: 只允许字母 / 数字 / 下划线；同一库装多个站点时改成不同前缀
+      - name: LOCALE
+        label: 语言
+        type: select
+        default: zh_CN
+        choices:
+          - { label: 简体中文, value: zh_CN }
+          - { label: English, value: en_US }
+        desc: 中文包体积略大，下载源为 cn.wordpress.org
+  uninstall:
+    intro: >-
+      Uninstall removes the WordPress program files from the site root. The database is kept
+      by default: turn on BACKUP_DB to dump it into ~/backups first, and DROP_DB only if you
+      are sure you want the data gone.
+    items:
+      - name: BACKUP_DB
+        label: 先备份数据库
+        type: bool
+        default: true
+        desc: 用 mysqldump 导出到站点账号家目录的 backups/
+      - name: DROP_DB
+        label: 同时删除数据库
+        type: bool
+        default: false
+        desc: 危险：库里的文章与设置会一起消失，且不可恢复
+      - name: REMOVE_CONTENT
+        label: 删除 wp-content
+        type: bool
+        default: true
+        desc: 含主题、插件与上传的图片；关闭则保留，便于重装后直接复用
+  upgrade:
+    intro: >-
+      Upgrade replaces the WordPress core files only: wp-config.php and wp-content (themes,
+      plugins, uploads) are kept, then `wp core update-db` runs when wp-cli is available.
