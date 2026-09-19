@@ -14,15 +14,29 @@ set -euo pipefail
 source "${ZAP_PATH}/scripts/zap/bash_utils.sh"
 
 # ── 编译依赖 ───────────────────────────────────────────────
-if command -v apt-get >/dev/null 2>&1; then
-    apt-get update
-    apt-get install -y \
-        libxml2-dev libsqlite3-dev libcurl4-openssl-dev libjpeg-dev libwebp-dev \
-        libpng-dev libonig-dev libicu-dev libzip-dev libpq-dev zlib1g-dev pkg-config || true
-elif command -v yum >/dev/null 2>&1; then
-    yum install -y libxml2-devel sqlite-devel curl-devel libjpeg-devel libwebp-devel \
-        libpng-devel oniguruma-devel libicu-devel libzip-devel postgresql-devel zlib-devel pkgconfig || true
-fi
+# 逐个安装：apt 只要有一个包名找不到就整条命令失败、一个都不装，
+# 所以不能写成 `apt-get install -y <一长串> || true`（那样等于静默全不装）。
+# 单个依赖缺失在 configure / make 阶段会暴露，故只告警、不中断。
+PKG_MGR="$(pkg_manager || true)"
+case "${PKG_MGR}" in
+    apt)
+        apt-get update -y >/dev/null 2>&1 || log_warn "apt-get update 失败(继续尝试安装)"
+        for p in libxml2-dev libsqlite3-dev libcurl4-openssl-dev libjpeg-dev libwebp-dev \
+                 libpng-dev libonig-dev libicu-dev libzip-dev libpq-dev zlib1g-dev pkg-config; do
+            pkg_install_any apt "$p" || true
+        done
+        ;;
+    dnf | yum)
+        for p in libxml2-devel sqlite-devel curl-devel libjpeg-devel libwebp-devel \
+                 libpng-devel oniguruma-devel libicu-devel libzip-devel postgresql-devel \
+                 zlib-devel pkgconfig; do
+            pkg_install_any "${PKG_MGR}" "$p" || true
+        done
+        ;;
+    *)
+        log_warn "未识别的包管理器：请自行确认编译依赖已安装"
+        ;;
+esac
 
 # ── 运行用户 www（php-fpm 以 www 运行） ────────────────────
 ensure_user www www

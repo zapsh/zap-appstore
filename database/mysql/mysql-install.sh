@@ -12,12 +12,37 @@ if [ -d "/usr/local/mysql" ]; then
 fi
 
 # ── 运行时依赖库 ───────────────────────────────────────────
-if command -v apt-get >/dev/null 2>&1; then
-    apt-get update
-    apt-get install -y libncurses5 libaio1 libncurses6 || true
-elif command -v yum >/dev/null 2>&1; then
-    yum install -y libaio ncurses-compat-libs || true
-fi
+# mysqld 需要 libaio.so.1、mysql 客户端需要 libncurses；包名随发行版 / 版本变化：
+# Ubuntu 24.04+、Debian 13+（is_os_ge ubuntu 24.04 / is_os_ge debian 13）里
+# libaio1 已改名 libaio1t64，且该包只提供 libaio.so.1t64 —— 官方二进制仍按
+# libaio.so.1 加载，所以装完还要补同名软链（link_lib_compat）；libncurses5 也已下线。
+# 因此：先按 soname 探测，缺失再按候选包名逐个尝试，最后按 soname 复核。
+PKG_MGR="$(pkg_manager || true)"
+case "${PKG_MGR}" in
+    apt)
+        apt-get update -y >/dev/null 2>&1 || log_warn "apt-get update 失败(继续尝试安装)"
+        if ! have_lib libaio.so.1; then
+            pkg_install_any apt libaio1t64 libaio1 \
+                || log_warn "libaio 包未装上，尝试用已有库做兼容软链"
+            link_lib_compat libaio.so.1 libaio.so.1t64 \
+                || { log_error "缺少 libaio.so.1：mysqld 必需。请手动安装 libaio1t64(Ubuntu 24.04+/Debian 13+) 或 libaio1 后重试"; exit 1; }
+        fi
+        have_lib 'libncurses.so.*' \
+            || pkg_install_any apt libncurses6 libncurses5 \
+            || { log_error "缺少 libncurses：mysql 客户端必需。请手动安装 libncurses6(或旧系统的 libncurses5) 后重试"; exit 1; }
+        ;;
+    dnf | yum)
+        have_lib libaio.so.1 \
+            || pkg_install_any "${PKG_MGR}" libaio \
+            || { log_error "缺少 libaio.so.1：mysqld 必需。请手动安装 libaio 后重试"; exit 1; }
+        have_lib 'libncurses.so.*' \
+            || pkg_install_any "${PKG_MGR}" ncurses-libs ncurses-compat-libs \
+            || { log_error "缺少 libncurses：mysql 客户端必需。请手动安装 ncurses-libs 后重试"; exit 1; }
+        ;;
+    *)
+        log_warn "未识别的包管理器：请自行确认 libaio.so.1 与 libncurses 已安装"
+        ;;
+esac
 
 # ── 系统用户 ───────────────────────────────────────────────
 # mysqld 以 mysql 用户/组运行（--user=mysql、chown mysql:mysql 均依赖它）
@@ -93,7 +118,7 @@ if [ -d "${APPS_DIR}/${PKG_EXTRACT_DIR}" ] && [ ! -d "${INSTALL_DIR}" ]; then
     mv "${APPS_DIR}/${PKG_EXTRACT_DIR}" "${INSTALL_DIR}"
 fi
 if [ ! -d "${INSTALL_DIR}" ]; then
-    echo "Error unpacking mysql: ${INSTALL_DIR} not found"
+    log_error "Error unpacking mysql: ${INSTALL_DIR} not found"
     exit 1
 fi
 
@@ -128,7 +153,7 @@ bin/mysqld --initialize-insecure --basedir=/usr/local/mysql --datadir=/usr/local
 cat > /etc/mysql/my.cnf <<EOF
 [client]
 port            = 3306
-socket          = /var/run/mysqld/mysqld.sock
+socket          = /tmp/mysql.sock
 default-character-set = utf8mb4
 
 [mysql]
@@ -137,7 +162,7 @@ default-character-set = utf8mb4
 [mysqld]
 user            = mysql
 port            = 3306
-socket          = /var/run/mysqld/mysqld.sock
+socket          = /tmp/mysql.sock
 basedir        = /usr/local/mysql
 datadir         = /usr/local/mysql/data
 log-error       = /var/log/mysql/error.log
@@ -159,7 +184,7 @@ log_timestamps       = SYSTEM
 
 
 # 默认 128M 太小，（建议设为总内存的 50% - 70%)
-innodb_buffer_pool_size = 1G 
+innodb_buffer_pool_size = 512M 
 
 max_connections         = 500
 max_connect_errors       = 1000
