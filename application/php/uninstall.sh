@@ -54,4 +54,24 @@ if [ -d "${PHP_INSTALL_PATH}" ]; then
     echo "Removing done."
 fi
 
+# ── openssl 依赖提示 ───────────────────────────────────────
+# PHP 7.x-8.0 链接 openssl1.1 实例(安装时已写进 RUNPATH),卸载本实例后若已无其它
+# PHP 实例引用,openssl1.1 即为孤儿库。只提示、不自动删,交由用户决定。
+if [[ "${APP_VERSION}" < "8.1.0" ]] && [ -d "${APPS_DIR}/openssl1.1" ] && command -v readelf >/dev/null 2>&1; then
+    _still_used=0
+    for _d in "${APPS_DIR}"/php-*; do
+        [ -d "${_d}" ] || continue
+        [ "${_d}" = "${PHP_INSTALL_PATH}" ] && continue
+        for _b in "${_d}/bin/php" "${_d}/sbin/php-fpm"; do
+            if [ -f "${_b}" ] && readelf -d "${_b}" 2>/dev/null | grep -qE "openssl1\.1|libssl\.so\.1\.1"; then
+                _still_used=1
+                break 2
+            fi
+        done
+    done
+    if [ "${_still_used}" -eq 0 ]; then
+        echo "提示:已无其它 PHP 实例引用 openssl1.1,可在面板卸载「openssl 1.1」"
+    fi
+fi
+
 echo "php uninstall successful"

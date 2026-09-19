@@ -55,6 +55,11 @@ if [[ "${APP_VERSION}" < "8.1.0" ]]; then
     fi
     export PKG_CONFIG_PATH="${APPS_DIR}/openssl1.1/lib/pkgconfig"
     OPENSSL_OPTS="--with-openssl=${APPS_DIR}/openssl1.1"
+    # 运行期定位:把 1.1 实例的 lib 写进 php/php-fpm 的 RUNPATH,不依赖系统 ld.so.cache,
+    # 也就不受「openssl 实例卸载后 ld.so.conf 片段被删」影响。
+    # 注:下面的 --disable-rpath 只清 PHP 自己生成的 rpath,不会剥离这里显式传入的
+    # -Wl,-rpath,两者可共存(正是我们想要的:只硬编码 openssl 路径)。
+    export LDFLAGS="${LDFLAGS:+$LDFLAGS }-Wl,-rpath,${APPS_DIR}/openssl1.1/lib -L${APPS_DIR}/openssl1.1/lib"
 fi
 log_info "PKG_CONFIG_PATH: ${PKG_CONFIG_PATH:-} | OPENSSL_OPTS: ${OPENSSL_OPTS}"
 
@@ -147,6 +152,16 @@ make -j "${CPU_NUM:-1}" && make install
 if [ ! -d "${PHP_INSTALL_PATH}" ]; then
     log_error "PHP ${APP_VERSION} Install failed"
     exit 1
+fi
+
+# ── openssl 运行期定位自检(仅 7.x-8.0)────────────────────────────
+# 链接期有 -L 就一定成功,失败只会在运行时暴露(php-fpm 起不来),故这里立即校验 RUNPATH。
+if [[ "${APP_VERSION}" < "8.1.0" ]] && command -v readelf >/dev/null 2>&1; then
+    if readelf -d "${PHP_INSTALL_PATH}/sbin/php-fpm" 2>/dev/null | grep -q "openssl1\.1"; then
+        log_ok "php-fpm 已内联 openssl1.1 运行期路径(RUNPATH),不依赖系统 ldconfig"
+    else
+        log_warn "php-fpm 未写入 openssl1.1 的 RUNPATH,运行期只能靠 ldconfig 缓存;请确认 /etc/ld.so.conf.d/zap-openssl-1.conf 存在并执行 ldconfig"
+    fi
 fi
 
 # ── 配置文件 ───────────────────────────────────────────────
