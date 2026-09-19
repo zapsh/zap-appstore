@@ -7,10 +7,55 @@ source "${ZAP_PATH}/scripts/zap/bash_utils.sh"
 
 
 MYSQL_SHORT_VERSION="${MAJOR_VERSION}.${MINOR_VERSION}"
-# check mysql is installed
-if [ -d "/usr/local/mysql" ]; then
-    log_error "mysql 已安装,请先卸载 mysql 后再安装 mariadb"
+INSTALL_DIR="${APPS_DIR}/mariadb-${MYSQL_SHORT_VERSION}"
+# 兼容早期按完整版本命名的安装目录
+if [ ! -d "${INSTALL_DIR}" ] && [ -d "${APPS_DIR}/mariadb-${APP_VERSION}" ]; then
+    INSTALL_DIR="${APPS_DIR}/mariadb-${APP_VERSION}"
+fi
+MYSQL_LINK="/usr/local/mysql"
+
+# ── 已安装 / 安装残局检查 ──────────────────────────────────
+# 与 MySQL 同理：系统只在脚本成功退出后写 meta.yaml（面板「已安装」才可卸载），
+# 中途失败（如 mariadb-install-db / 启动缺 libaio.so.1）会留下目录与软链，
+# 于是「面板说没装（不能卸载）+ 脚本说装了（不能重装）」的死锁。
+# 判据：APP_PATH/info.yaml = 装完了 → 拒绝；否则清理残局后继续装。
+if app_install_complete; then
+    log_error "mariadb 已安装（${APP_PATH}/info.yaml 已登记）,请先卸载后再安装"
     exit 1
+fi
+if [ -L "${MYSQL_LINK}" ]; then
+    RESOLVED="$(readlink -f "${MYSQL_LINK}" 2>/dev/null || true)"
+    if [ -z "${RESOLVED}" ] || [ ! -d "${RESOLVED}" ]; then
+        log_warn "残留软链 ${MYSQL_LINK} 指向已不存在的位置（${RESOLVED:-空}）,直接移除"
+        remove_path "${MYSQL_LINK}"
+    elif db_data_initialized "${RESOLVED}/data"; then
+        log_error "${MYSQL_LINK} -> ${RESOLVED} 的数据目录已初始化（可能含真实数据）,不自动清理"
+        log_error "重装请先备份数据,再手动删除 ${RESOLVED} 与 ${MYSQL_LINK} 后重试"
+        exit 1
+    elif path_under "${RESOLVED}" "${APPS_DIR}"; then
+        log_warn "检测到上次安装残留: ${MYSQL_LINK} -> ${RESOLVED}（数据目录未初始化）,自动清理后继续安装"
+        service_stop_disable mysql.service || true
+        remove_path "${MYSQL_LINK}"
+        remove_path "${RESOLVED}"
+        remove_path /etc/mysql
+        remove_path /etc/init.d/mysql
+        remove_path /etc/systemd/system/mysql.service
+        if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || true; fi
+    else
+        log_error "${MYSQL_LINK} -> ${RESOLVED} 不在 ${APPS_DIR} 下,不自动清理;请人工确认后移除"
+        exit 1
+    fi
+elif [ -e "${MYSQL_LINK}" ]; then
+    log_error "${MYSQL_LINK} 已存在且不是本包创建的软链（可能是手工安装的 MySQL/MariaDB）:不自动处理"
+    log_error "如需继续,请先备份并手动移除 ${MYSQL_LINK} 后重试"
+    exit 1
+elif [ -d "${INSTALL_DIR}" ]; then
+    if db_data_initialized "${INSTALL_DIR}/data"; then
+        log_error "${INSTALL_DIR} 数据目录已初始化（可能含真实数据）,不自动清理;请先备份并手动删除后重试"
+        exit 1
+    fi
+    log_warn "检测到残留安装目录 ${INSTALL_DIR}（数据目录未初始化）,自动清理后继续安装"
+    remove_path "${INSTALL_DIR}"
 fi
 
 # ── 系统用户 ───────────────────────────────────────────────
@@ -32,8 +77,11 @@ case "${PKG_MGR}" in
             link_lib_compat libaio.so.1 libaio.so.1t64 \
                 || { log_error "缺少 libaio.so.1：mariadbd 必需。请手动安装 libaio1t64(Ubuntu 24.04+/Debian 13+) 或 libaio1 后重试"; exit 1; }
         fi
+        # 官方包里的 mariadb 客户端按 libncurses.so.6 加载（不是 libncursesw.so.6）：
+        # 源里装不上时用已有的 libncursesw.so.6 建同名软链兜底
         have_lib 'libncurses.so.*' \
             || pkg_install_any apt libncurses6 libncurses5 \
+            || link_lib_compat libncurses.so.6 libncursesw.so.6 \
             || { log_error "缺少 libncurses：mariadb 客户端必需。请手动安装 libncurses6(或旧系统的 libncurses5) 后重试"; exit 1; }
         ;;
     dnf | yum)
@@ -56,29 +104,33 @@ chown -R mysql:mysql /var/log/mysql /var/run/mysqld
 # ── 解压二进制包 ───────────────────────────────────────────
 PKG_TARBALL="mariadb-${APP_VERSION}-linux-systemd-x86_64.tar.gz"
 cd "${PKG_PATH}"
-if [ ! -f "${PKG_TARBALL}" ]; then
-    log_info "下载 mariadb: ${PKG_TARBALL}"
-    # 统一走 bash_utils::download_file（curl --progress-bar / wget --show-progress）：
-    # 非 TTY 下以 \r 原地刷新，日志里只占一行进度条，而非 wget 默认的逐行 dot 进度
-    download_file "https://mirrors.zap.cn/pkg/mariadb/${PKG_TARBALL}" "${PKG_TARBALL}"
+if [ -d "${INSTALL_DIR}" ]; then
+    log_info "复用已存在的安装目录: ${INSTALL_DIR}（跳过下载 / 解压）"
+else
+    # 半解压残留：tar 中途失败会留下不完整的解压目录，先清掉再重新解压
+    remove_path "${APPS_DIR}/mariadb-${APP_VERSION}-linux-systemd-x86_64"
+    if [ ! -f "${PKG_TARBALL}" ]; then
+        log_info "下载 mariadb: ${PKG_TARBALL}"
+        # 统一走 bash_utils::download_file（curl --progress-bar / wget --show-progress）：
+        # 非 TTY 下以 \r 原地刷新，日志里只占一行进度条，而非 wget 默认的逐行 dot 进度
+        download_file "https://mirrors.zap.cn/pkg/mariadb/${PKG_TARBALL}" "${PKG_TARBALL}"
+    fi
+    tar xf "${PKG_TARBALL}" -C "${APPS_DIR}"
+    if [ ! -d "${INSTALL_DIR}" ]; then
+        mv "${APPS_DIR}/mariadb-${APP_VERSION}-linux-systemd-x86_64" "${INSTALL_DIR}"
+    fi
 fi
-tar xf "${PKG_TARBALL}" -C "${APPS_DIR}"
 
-INSTALL_DIR="${APPS_DIR}/mariadb-${MYSQL_SHORT_VERSION}"
-if [ ! -d "${INSTALL_DIR}" ]; then
-    mv "${APPS_DIR}/mariadb-${APP_VERSION}-linux-systemd-x86_64" "${INSTALL_DIR}"
-fi
-
-if [ ! -L /usr/local/mysql ] && [ ! -d /usr/local/mysql ]; then
-    ln -s "${INSTALL_DIR}" /usr/local/mysql
-fi
+# 软链幂等重建（-sfn 不会把已有目录变成嵌套链接）
+ln -sfn "${INSTALL_DIR}" /usr/local/mysql
 
 ln -sf "${INSTALL_DIR}/bin/mariadb" /usr/local/bin/mariadb
 ln -sf "${INSTALL_DIR}/bin/mysql" /usr/local/bin/mysql
 ln -sf "${INSTALL_DIR}/bin/mysqldump" /usr/local/bin/mysqldump
 
 # ── 配置 ───────────────────────────────────────────────────
-if [ -d "/etc/mysql" ]; then
+# 只有确实存在配置时才备份（空目录不留一堆 .bak，重跑也不会重复备份）
+if [ -f "/etc/mysql/my.cnf" ]; then
     mv /etc/mysql /etc/mysql.bak.$(date +%s)
 fi
 ensure_dir "/etc/mysql"
@@ -124,7 +176,14 @@ cd "${INSTALL_DIR}"
 chown -R mysql:mysql "${INSTALL_DIR}"
 
 # 初始化数据目录
-${INSTALL_DIR}/scripts/mariadb-install-db --user=mysql --datadir="${INSTALL_DIR}/data" --basedir="${INSTALL_DIR}"
+DATA_DIR="${INSTALL_DIR}/data"
+if db_data_initialized "${DATA_DIR}"; then
+    log_info "数据目录已初始化,跳过 mariadb-install-db（重跑不重复初始化,也不覆盖已有库）"
+else
+    # 半初始化残局：目录下有零散文件时 mariadb-install-db 会失败，先清掉
+    remove_path "${DATA_DIR}"
+    ${INSTALL_DIR}/scripts/mariadb-install-db --user=mysql --datadir="${DATA_DIR}" --basedir="${INSTALL_DIR}"
+fi
 
 # ── 开机自启 ───────────────────────────────────────────────
 if command -v systemctl >/dev/null 2>&1; then

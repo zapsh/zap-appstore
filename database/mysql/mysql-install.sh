@@ -5,10 +5,54 @@ set -euo pipefail
 
 source "${ZAP_PATH}/scripts/zap/bash_utils.sh"
 
-# check mysql is installed
-if [ -d "/usr/local/mysql" ]; then
-    log_error "mysql 已安装,请先卸载 mysql 后再安装"
+MYSQL_SHORT_VERSION="${MAJOR_VERSION}.${MINOR_VERSION}"
+INSTALL_DIR="${APPS_DIR}/mysql-${MYSQL_SHORT_VERSION}"
+MYSQL_LINK="/usr/local/mysql"
+
+# ── 已安装 / 安装残局检查 ──────────────────────────────────
+# 系统只在脚本【成功退出】后才写 meta.yaml（面板据此显示「已安装」并可卸载）。
+# 因此安装中途失败（典型：mysqld 初始化缺 libaio.so.1）时，面板仍显示未安装
+# → 卸载按钮不可用；而这里若只看 /usr/local/mysql 在不在又说「已安装」
+# → 装也装不了、卸也卸不掉，形成死锁。
+# 判据：APP_PATH/info.yaml（脚本末尾登记）= 装完了 → 拒绝重装；
+#       目录/软链还在但没登记 = 装了一半的残局 → 清理后继续装。
+if app_install_complete; then
+    log_error "mysql 已安装（${APP_PATH}/info.yaml 已登记）,请先卸载 mysql 后再安装"
     exit 1
+fi
+if [ -L "${MYSQL_LINK}" ]; then
+    RESOLVED="$(readlink -f "${MYSQL_LINK}" 2>/dev/null || true)"
+    if [ -z "${RESOLVED}" ] || [ ! -d "${RESOLVED}" ]; then
+        log_warn "残留软链 ${MYSQL_LINK} 指向已不存在的位置（${RESOLVED:-空}）,直接移除"
+        remove_path "${MYSQL_LINK}"
+    elif db_data_initialized "${RESOLVED}/data"; then
+        log_error "${MYSQL_LINK} -> ${RESOLVED} 的数据目录已初始化（可能含真实数据）,不自动清理"
+        log_error "重装请先备份数据,再手动删除 ${RESOLVED} 与 ${MYSQL_LINK} 后重试"
+        exit 1
+    elif path_under "${RESOLVED}" "${APPS_DIR}"; then
+        log_warn "检测到上次安装残留: ${MYSQL_LINK} -> ${RESOLVED}（数据目录未初始化）,自动清理后继续安装"
+        service_stop_disable mysql.service || true
+        remove_path "${MYSQL_LINK}"
+        remove_path "${RESOLVED}"
+        remove_path /etc/mysql
+        remove_path /etc/init.d/mysql
+        remove_path /etc/systemd/system/mysql.service
+        if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || true; fi
+    else
+        log_error "${MYSQL_LINK} -> ${RESOLVED} 不在 ${APPS_DIR} 下,不自动清理;请人工确认后移除"
+        exit 1
+    fi
+elif [ -e "${MYSQL_LINK}" ]; then
+    log_error "${MYSQL_LINK} 已存在且不是本包创建的软链（可能是手工安装的 MySQL）:不自动处理"
+    log_error "如需继续,请先备份并手动移除 ${MYSQL_LINK} 后重试"
+    exit 1
+elif [ -d "${INSTALL_DIR}" ]; then
+    if db_data_initialized "${INSTALL_DIR}/data"; then
+        log_error "${INSTALL_DIR} 数据目录已初始化（可能含真实数据）,不自动清理;请先备份并手动删除后重试"
+        exit 1
+    fi
+    log_warn "检测到残留安装目录 ${INSTALL_DIR}（数据目录未初始化）,自动清理后继续安装"
+    remove_path "${INSTALL_DIR}"
 fi
 
 # ── 运行时依赖库 ───────────────────────────────────────────
@@ -27,8 +71,12 @@ case "${PKG_MGR}" in
             link_lib_compat libaio.so.1 libaio.so.1t64 \
                 || { log_error "缺少 libaio.so.1：mysqld 必需。请手动安装 libaio1t64(Ubuntu 24.04+/Debian 13+) 或 libaio1 后重试"; exit 1; }
         fi
+        # 官方包里的 mysql 客户端按 libncurses.so.6 加载（不是 libncursesw.so.6）：
+        # 源里装不上时退而求其次，用系统已有的 libncursesw.so.6 建同名软链，
+        # 比直接判失败退出更有用（客户端起不来，本脚本后续的 SQL 也执行不了）
         have_lib 'libncurses.so.*' \
             || pkg_install_any apt libncurses6 libncurses5 \
+            || link_lib_compat libncurses.so.6 libncursesw.so.6 \
             || { log_error "缺少 libncurses：mysql 客户端必需。请手动安装 libncurses6(或旧系统的 libncurses5) 后重试"; exit 1; }
         ;;
     dnf | yum)
@@ -53,8 +101,6 @@ chown -R mysql:mysql /var/log/mysql /var/run/mysqld
 
 # ── 选择与系统 glibc 匹配的官方二进制包 ───────────────────
 # 仅支持 MySQL 8.0+（5.7 及更早版本已移除）
-MYSQL_SHORT_VERSION="${MAJOR_VERSION}.${MINOR_VERSION}"
-
 if [ "${MAJOR_VERSION}" -lt 8 ]; then
     log_error "MySQL ${APP_VERSION} 不再受支持：已移除 5.7 及更早版本，请选择 8.0+"
     exit 1
@@ -106,20 +152,25 @@ PKG_TARBALL="mysql-${APP_VERSION}-linux-glibc${GLIBC_PKG}-x86_64-minimal.tar.xz"
 PKG_EXTRACT_DIR="mysql-${APP_VERSION}-linux-glibc${GLIBC_PKG}-x86_64-minimal"
 
 cd "${PKG_PATH}"
-if [ ! -f "${PKG_TARBALL}" ]; then
-    log_info "下载 mysql: ${PKG_TARBALL}"
-    download_file "https://mirrors.zap.cn/pkg/mysql/${PKG_TARBALL}" "${PKG_TARBALL}" || true
-fi
-tar xf "${PKG_TARBALL}" -C "${APPS_DIR}"
+if [ -d "${INSTALL_DIR}" ]; then
+    log_info "复用已存在的安装目录: ${INSTALL_DIR}（跳过下载 / 解压）"
+else
+    # 半解压残留：tar 中途失败会留下不完整的解压目录，先清掉再重新解压
+    remove_path "${APPS_DIR}/${PKG_EXTRACT_DIR}"
+    if [ ! -f "${PKG_TARBALL}" ]; then
+        log_info "下载 mysql: ${PKG_TARBALL}"
+        download_file "https://mirrors.zap.cn/pkg/mysql/${PKG_TARBALL}" "${PKG_TARBALL}" || true
+    fi
+    tar xf "${PKG_TARBALL}" -C "${APPS_DIR}"
 
-# ── 安装目录（解压目录名含 glibc 标识，统一重命名为 mysql-版本） mysql-8.0 ──
-INSTALL_DIR="${APPS_DIR}/mysql-${MYSQL_SHORT_VERSION}"
-if [ -d "${APPS_DIR}/${PKG_EXTRACT_DIR}" ] && [ ! -d "${INSTALL_DIR}" ]; then
-    mv "${APPS_DIR}/${PKG_EXTRACT_DIR}" "${INSTALL_DIR}"
-fi
-if [ ! -d "${INSTALL_DIR}" ]; then
-    log_error "Error unpacking mysql: ${INSTALL_DIR} not found"
-    exit 1
+    # ── 安装目录（解压目录名含 glibc 标识，统一重命名为 mysql-版本） mysql-8.0 ──
+    if [ -d "${APPS_DIR}/${PKG_EXTRACT_DIR}" ] && [ ! -d "${INSTALL_DIR}" ]; then
+        mv "${APPS_DIR}/${PKG_EXTRACT_DIR}" "${INSTALL_DIR}"
+    fi
+    if [ ! -d "${INSTALL_DIR}" ]; then
+        log_error "Error unpacking mysql: ${INSTALL_DIR} not found"
+        exit 1
+    fi
 fi
 
 if [ "${SET_DEFAULT:-false}" = "true" ]; then
@@ -137,7 +188,8 @@ fi
 
 
 # ── 配置 ───────────────────────────────────────────────────
-if [ -d "/etc/mysql" ]; then
+# 只有确实存在配置时才备份（空目录不留一堆 .bak，重跑也不会重复备份）
+if [ -f "/etc/mysql/my.cnf" ]; then
     mv /etc/mysql "/etc/mysql.bak.$(date +%Y%m%d%H%M%S)"
 fi
 mkdir -p /etc/mysql
@@ -148,7 +200,16 @@ chmod 750 mysql-files
 chown -R mysql:mysql "${INSTALL_DIR}"
 
 # 初始化数据目录（无密码模式，随后设置 root 密码）
-bin/mysqld --initialize-insecure --basedir=/usr/local/mysql --datadir=/usr/local/mysql/data --user=mysql
+DATA_DIR="${INSTALL_DIR}/data"
+if db_data_initialized "${DATA_DIR}"; then
+    log_info "数据目录已初始化,跳过 mysqld --initialize-insecure（重跑不重复初始化,也不覆盖已有库）"
+    DATA_REUSED=1
+else
+    # 半初始化残局：目录下有零散文件时 mysqld 拒绝初始化，先清掉
+    remove_path "${DATA_DIR}"
+    bin/mysqld --initialize-insecure --basedir=/usr/local/mysql --datadir=/usr/local/mysql/data --user=mysql
+    DATA_REUSED=0
+fi
 
 cat > /etc/mysql/my.cnf <<EOF
 [client]
@@ -232,12 +293,26 @@ get_or_gen_cred() {
 MYSQL_ROOT_PASSWORD="$(get_or_gen_cred root)" || exit 1
 ZAPADM_PASSWORD="$(get_or_gen_cred zapadm)" || exit 1
 
+# 此后凭据经 0600 临时配置文件传入（mktemp 默认 0600）：
+# 1) 避免命令行明文（ps 对同机用户可见） 2) 消除 "Using a password..." 告警
+ROOT_CNF="$(mktemp /tmp/mysql-root.XXXXXX.cnf)"
+trap 'rm -f "${ROOT_CNF:-}"' EXIT
+printf '[client]\nuser = root\npassword = %s\n' "${MYSQL_ROOT_PASSWORD}" > "${ROOT_CNF}"
+
 # 等待 mysqld 就绪（最多 60s）
+# 复用已初始化的数据目录时 root 已有密码（来自同一凭据库），探活必须带凭据
 MYSQLD_READY=0
 for _ in $(seq 1 60); do
-    if bin/mysqladmin -u root status >/dev/null 2>&1; then
-        MYSQLD_READY=1
-        break
+    if [ "${DATA_REUSED}" = "1" ]; then
+        if bin/mysqladmin --defaults-extra-file="${ROOT_CNF}" status >/dev/null 2>&1; then
+            MYSQLD_READY=1
+            break
+        fi
+    else
+        if bin/mysqladmin -u root status >/dev/null 2>&1; then
+            MYSQLD_READY=1
+            break
+        fi
     fi
     sleep 1
 done
@@ -247,15 +322,12 @@ if [ "${MYSQLD_READY}" -ne 1 ]; then
 fi
 
 # ── 设置 root 密码（接管 --initialize-insecure 产生的空密码 root）──
-bin/mysql -u root <<SQL
+# 复用已有数据目录时 root 密码早已设过（密码源同为凭据库），无需重复设置
+if [ "${DATA_REUSED}" != "1" ]; then
+    bin/mysql -u root <<SQL
 ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}';
 SQL
-
-# 此后凭据经 0600 临时配置文件传入（mktemp 默认 0600）：
-# 1) 避免命令行明文（ps 对同机用户可见） 2) 消除 "Using a password..." 告警
-ROOT_CNF="$(mktemp /tmp/mysql-root.XXXXXX.cnf)"
-trap 'rm -f "${ROOT_CNF:-}"' EXIT
-printf '[client]\nuser = root\npassword = %s\n' "${MYSQL_ROOT_PASSWORD}" > "${ROOT_CNF}"
+fi
 
 # ── zapadm 面板账号 + 清除空密码（单次会话幂等执行）──────
 # CREATE IF NOT EXISTS + ALTER 保证重装 / 密码轮换后与凭据库一致；

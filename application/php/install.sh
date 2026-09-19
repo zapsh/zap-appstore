@@ -38,10 +38,8 @@ case "${PKG_MGR}" in
         ;;
 esac
 
-# ── 运行用户 www（php-fpm 以 www 运行） ────────────────────
-ensure_user www www
-
-preInstallation
+# ── 前置：运行用户 www（php-fpm 以 www 运行）+ 目录 + 首次系统编译依赖 ──────
+prepare_install_env www
 
 # ── 低版本 PHP 需要 openssl 1.1 ───────────────────────────
 # PHP 7.x-8.0 仅兼容 OpenSSL < 3.0,必须链 1.1 实例:

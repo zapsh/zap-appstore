@@ -5,7 +5,7 @@
 # 特性:
 #   * 使用公共工具库 bash_utils:统一日志 / fetch_file(curl→wget 自动重试)/
 #     MakeInstall(并行编译失败自动回退串行)/ cpu_count / extract_archive /
-#     ensure_dir / preInstallation(www 用户 + 首次系统编译依赖);
+#     ensure_dir / prepare_install_env(运行用户 + 目录 + 首次系统编译依赖);
 #
 # 依赖环境变量(由 zapexec 注入):ZAP_PATH APPS_DIR PKG_PATH APP_PATH
 #   APP_NAME APP_VERSION MAJOR_VERSION MINOR_VERSION BUILD_PATH CPU_NUM
@@ -33,8 +33,8 @@ OPENSSL_EXTRA_CONFIG="${OPENSSL_EXTRA_CONFIG:-}"
 
 log_info "开始安装 OpenSSL ${APP_VERSION} -> ${INSTALL_PATH}"
 
-# ── 前置:运行用户 / 目录 / 首次系统编译依赖 ───────────────────────────────
-preInstallation
+# ── 前置:运行用户 www / 目录 / 首次系统编译依赖 ────────────────────────────
+prepare_install_env www
 
 # ── perl 预检(OpenSSL 编译必需)────────────────────────────────────────────
 _ensure_perl() {
