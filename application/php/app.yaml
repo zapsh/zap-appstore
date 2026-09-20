@@ -13,22 +13,25 @@ scripts:
   uninstall: uninstall.sh
 options:
   build:
-    - name: SET_DEFAULT
-      label: 设为全局默认 PHP
-      type: bool
-      default: true
-      desc: 勾选后把该版本注册到 /usr/local/bin（php / php-cgi / pear / pecl），所有用户执行 php 命令默认使用本版本；若当前已有其它默认版本，勾选将切换为本次安装的版本。未勾选则保持现有默认不变（可在「服务配置 → PHP」页随时切换）。
-    - name: EXTS
-      type: multiselect
-      title: 扩展
-      desc: 选择需要安装的扩展
-      choices:
-        - label: bcmath
-          value: bcmath
-        - label: calendar
-          value: calendar
-        - label: exif
-          value: exif
-        - label: fileinfo
-          value: fileinfo
-      
+    intro: >-
+      请选择安装选项
+    items:
+      - name: SET_DEFAULT
+        label: 设为全局默认 PHP
+        type: bool
+        default: false
+        desc: 注册php到 /usr/local/bin,所有用户执行 php 命令默认使用本版本；可在「服务配置 → PHP」页切换)。
+      - name: EXTS
+        type: multiselect
+        title: 扩展
+        desc: 选择需要安装的扩展
+        choices:
+          - label: bcmath
+            value: bcmath
+          - label: calendar
+            value: calendar
+          - label: exif
+            value: exif
+          - label: fileinfo
+            value: fileinfo
+        

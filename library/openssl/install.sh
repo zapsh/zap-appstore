@@ -31,10 +31,7 @@ OPENSSL_MIRROR="${OPENSSL_MIRROR:-https://mirrors.zap.cn/pkg/openssl}"
 OPENSSL_ENABLE_WEAK="${OPENSSL_ENABLE_WEAK:-1}"
 OPENSSL_EXTRA_CONFIG="${OPENSSL_EXTRA_CONFIG:-}"
 
-log_info "开始安装 OpenSSL ${APP_VERSION} -> ${INSTALL_PATH}"
-
-# ── 前置:运行用户 www / 目录 / 首次系统编译依赖 ────────────────────────────
-prepare_install_env www
+log_info "Installing OpenSSL ${APP_VERSION} -> ${INSTALL_PATH}"
 
 # ── perl 预检(OpenSSL 编译必需)────────────────────────────────────────────
 _ensure_perl() {
@@ -52,7 +49,7 @@ _ensure_perl() {
         fi
     fi
     if ! command -v perl >/dev/null 2>&1; then
-        log_error "缺少 perl,无法编译 OpenSSL;请先安装 perl 后重试"
+        log_error "required perl not found,please install it first"
         return 1
     fi
     # OpenSSL 3.x 的 Configure 需要 Text::Template(1.1.x 不需要)
@@ -130,10 +127,10 @@ log_ok "configure 完成,开始编译(并行 ${CPU_NUM:-auto},失败自动回退
 MakeInstall
 
 if [ ! -x "${INSTALL_PATH}/bin/openssl" ]; then
-    log_error "make install 未产出 ${INSTALL_PATH}/bin/openssl,安装失败"
+    log_error "MakeInstall failed"
     exit 1
 fi
-log_ok "编译安装完成: ${INSTALL_PATH}"
+log_ok "Completed: ${INSTALL_PATH}"
 
 # ── ssl 数据目录兜底(openssl.cnf / certs / private)───────────────────────
 ensure_dir "${INSTALL_PATH}/ssl"
@@ -147,39 +144,39 @@ if [ ! -f "${INSTALL_PATH}/ssl/openssl.cnf" ]; then
     fi
 fi
 
-# ── 系统级暴露 ─────────────────────────────────────────────────────────────
-# 仅注册 ld.so 索引片段(conf.d + ldconfig),让链接本库的程序运行时能按 soname
-# 找到库文件。1.x / 3.x 实例按 major 分文件,互不覆盖、可安全共存。
-#
-#
+
+
 # 编译期选择版本请显式指定:
 #   export PKG_CONFIG_PATH=<prefix>/lib/pkgconfig  (PHP >= 8.1 必须,走 pkg-config)
 #   ./configure --with-openssl=<prefix>            (PHP 7.x 支持 DIR 前缀形式)
 #   pkg-config --cflags --libs openssl             (临时单次使用,加 PKG_CONFIG_PATH)
-ensure_dir /etc/ld.so.conf.d
-printf '%s\n' "${INSTALL_PATH}/lib" > "/etc/ld.so.conf.d/zap-openssl-${MAJOR_VERSION}.conf"
-ldconfig >/dev/null 2>&1 || log_warn "ldconfig 执行失败,请手动执行 ldconfig"
+
+# register ld.so.conf
+if [ "${MAJOR_VERSION}" != "1" ]; then
+    ensure_dir /etc/ld.so.conf.d
+    printf '%s\n' "${INSTALL_PATH}/lib" > "/etc/ld.so.conf.d/zap-openssl-${MAJOR_VERSION}.conf"
+    ldconfig >/dev/null 2>&1 || log_warn "ldconfig 执行失败,请手动执行 ldconfig"
+fi
+
 
 # ── 版本自检 ───────────────────────────────────────────────────────────────
 log_info "openssl 版本: $("${INSTALL_PATH}/bin/openssl" version)"
 log_info "openssl 数据目录: $("${INSTALL_PATH}/bin/openssl" version -d)"
 
-# ── 登记实例信息(apps/<category>/<name>/info.yaml,供「已安装」展示)──────
-# 说明:运行元数据(version/run_id/source/installed_at/upgraded_from...)由
-# zapexec 写入同目录 meta.yaml;脚本只需登记实例展示/探测所需字段。本应用
-# 为无守护进程的静态库,故不写 svc_name/pid_file(状态由 zapexec 返回 unknown)。
+
+# register instance info
 ensure_dir "${APP_PATH}"
 cat > "${APP_PATH}/info.yaml" <<EOF
 instance: openssl${SHORT_VERSION}
 install_dir: ${INSTALL_PATH}
+version: ${APP_VERSION}
 config_file: ${INSTALL_PATH}/ssl/openssl.cnf
-config_files:
-  - path: /etc/ld.so.conf.d/zap-openssl-${MAJOR_VERSION}.conf
-    label: zap-openssl-${MAJOR_VERSION}.conf
 expose: none
 tags:
   - library
   - crypto
+dependencies:
+  - openssl${SHORT_VERSION}
 EOF
 log_info "已登记实例信息: ${APP_PATH}/info.yaml"
 

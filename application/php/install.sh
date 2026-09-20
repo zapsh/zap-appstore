@@ -124,7 +124,6 @@ fi
     --prefix="${PHP_INSTALL_PATH}" \
     --with-config-file-path="${PHP_INSTALL_PATH}/etc" \
     --with-config-file-scan-dir="${PHP_INSTALL_PATH}/etc/php.d" \
-    --disable-rpath \
     --enable-sysvsem \
     --enable-sysvshm \
     --enable-pcntl \
@@ -143,7 +142,6 @@ fi
     --with-pdo-mysql=mysqlnd \
     --enable-mbstring \
     --enable-intl \
-    --with-pear \
     "${EXT_OPTS[@]}"
 
 log_info "make install"
@@ -291,6 +289,7 @@ cat > "${APP_PATH}/info.yaml" <<EOF
 svc_name: php-fpm-${PHP_SHORT_VERSION}
 instance: php${PHP_SHORT_VERSION}
 install_dir: ${PHP_INSTALL_PATH}
+version: ${APP_VERSION}
 config_file: ${PHP_INSTALL_PATH}/etc/php.ini
 config_files:
   - path: ${PHP_INSTALL_PATH}/etc/php.ini
