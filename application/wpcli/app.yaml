@@ -1,0 +1,9 @@
+name: wpcli
+title: WP-CLI
+version: ["latest"]
+category: application
+description: WP-CLI is the command-line interface for WordPress — install, configure and manage WordPress from the terminal. Installing it lets the app store's WordPress package create the site and its admin account automatically; without it, you finish setup in the browser wizard.
+tags: [php, wordpress, cli]
+scripts:
+  install: install.sh
+  uninstall: uninstall.sh

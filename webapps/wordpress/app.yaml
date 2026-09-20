@@ -1,6 +1,6 @@
 name: wordpress
 title: WordPress
-version: ["6.8.2", "6.7.2"]
+version: ["latest","6.8.2", "6.7.2"]
 category: webapps
 description: 最流行的 PHP 建站程序（博客 / 企业站 / CMS）。面板会自动准备好站点与专用数据库，脚本以站点 Linux 账号身份把程序装进站点根目录。
 tags: [wordpress, cms, blog, php]

@@ -61,8 +61,11 @@ def move_into(src, dest, skip=()):
         shutil.move(str(item), str(target))
 
 
-def run_masked(cmd, cwd=None):
-    """执行可能含密码的命令：日志里把密码打码，ps / 日志都不留明文。"""
+def run_masked(cmd, cwd=None, check: bool = True) -> bool:
+    """执行可能含密码的命令：日志里把密码打码，ps / 日志都不留明文。
+
+    check=False 时失败只告警（用于「能自动完成最好，失败也不算安装失败」的步骤）。
+    """
     safe = []
     for a in cmd:
         for flag in ("--admin_password=", "--password="):
@@ -73,8 +76,11 @@ def run_masked(cmd, cwd=None):
     log_info("$", " ".join(safe))
     p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if p.returncode != 0:
-        die(f"命令失败 ({p.returncode}): {' '.join(safe)}\n{p.stderr.strip()}")
-    return p.stdout
+        if check:
+            die(f"命令失败 ({p.returncode}): {' '.join(safe)}\n{p.stderr.strip()}")
+        log_warn(f"命令失败 ({p.returncode})，已跳过：{' '.join(safe)}\n{p.stderr.strip()}")
+        return False
+    return True
 
 
 def main():
@@ -107,6 +113,14 @@ def main():
     move_into(src, root)
     log_ok("程序已部署：", root)
 
+    # ── 权限：目录 755 / 文件 644，上传目录要能写 ────────────────
+    # 顺序有讲究：chmod_tree 会把目录下所有文件统一刷成 644，
+    # 而 wp-config.php 里是数据库明文密码，必须保持 render() 给的 0640，
+    # 所以它只能在 chmod_tree 之后生成。
+    chmod_tree(root)
+    ensure_dir(root / "wp-content" / "uploads")
+    log_ok("权限已规整：", root)
+
     # ── 生成 wp-config.php ─────────────────────────────────────
     db_host = env("DB_HOST", "127.0.0.1")
     port = env("DB_PORT", "3306")
@@ -124,22 +138,25 @@ def main():
     }
     for key in SALTS:
         mapping[key] = random_password(64)
+    config = root / "wp-config.php"
     render(
         Path(env_required("PKG_SRC_PATH")) / "wp-config.php.tpl",
-        root / "wp-config.php",
+        config,
         mapping,
     )
+    try:
+        config.chmod(0o640)  # 保险：即便以后调整了调用顺序，密码也不外泄
+    except OSError:
+        pass
 
-    # ── 权限：目录 755 / 文件 644，上传目录要能写 ────────────────
-    chmod_tree(root)
-    ensure_dir(root / "wp-content" / "uploads")
-    log_ok("权限已规整：", root)
-
-    # ── 初始化站点（有 wp-cli 就直接建管理员，否则交给浏览器）────
+    # ── 初始化站点（装了 WP-CLI 就自动建管理员，否则交给浏览器）──
+    # wp 由应用商店「应用」分类里的 WP-CLI 包提供（/usr/local/bin/wp），
+    # 这里只使用、不下载 —— 站点脚本不该在安装过程中往系统里装东西。
     admin = env("ADMIN_USER")
     wp = shutil.which("wp")
     if wp and admin:
-        run_masked(
+        # 失败不算安装失败：程序与配置已就位，用户可走浏览器向导
+        if run_masked(
             [
                 wp,
                 "core",
@@ -152,10 +169,13 @@ def main():
                 "--skip-email",
             ],
             cwd=str(root),
-        )
-        log_ok("已完成 WordPress 初始化：", site_url)
+            check=False,
+        ):
+            log_ok("已完成 WordPress 初始化：", site_url)
+        else:
+            log_warn("自动初始化未完成，访问 %s 走安装向导（数据库信息已写入 wp-config.php）" % site_url)
     else:
-        log_warn("未找到 wp-cli，程序文件已就位：访问 %s 完成安装向导（数据库信息已写入 wp-config.php）" % site_url)
+        log_warn("未找到 wp 命令（应用商店 → 应用 → WP-CLI），程序文件已就位：访问 %s 完成安装向导（数据库信息已写入 wp-config.php）" % site_url)
 
     # ── 登记实例信息（密码类字段一律不写）───────────────────────
     write_info(
@@ -171,7 +191,7 @@ def main():
         db_user=mapping["DB_USER"],
         table_prefix=prefix,
         admin_user=admin,
-        config_file=str(root / "wp-config.php"),
+        config_file=str(config),
     )
 
     log_ok(f"WordPress {version} installing successful")
