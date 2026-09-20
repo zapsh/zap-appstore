@@ -29,6 +29,13 @@ WP_PHAR="${WP_DIR}/wp-cli.phar"
 ensure_dir "${WP_DIR}"
 
 # ── 下载 + 校验 ────────────────────────────────────────────
+if [ "${WP_CLI_PHAR_MIRROR}" = "zapsh" ]; then
+    log_info "使用自定义源下载 WP-CLI: ${WP_CLI_PHAR_MIRROR}"
+    WP_CLI_PHAR_URL="https://mirrors.zap.sh/pkg/wpcli/wp-cli.phar"
+else
+    log_info "使用官方源下载 WP-CLI"
+    WP_CLI_PHAR_URL="https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar"
+fi
 PHAR_URL="${WP_CLI_PHAR_URL:-https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
