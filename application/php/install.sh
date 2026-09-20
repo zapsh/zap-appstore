@@ -50,7 +50,7 @@ prepare_install_env www
 OPENSSL_OPTS="--with-openssl"
 if [[ "${APP_VERSION}" < "8.1.0" ]]; then
     if [ ! -d "${APPS_DIR}/openssl1.1" ]; then
-        log_error "Please install openssl1.1 first"
+        log_error "First, Go to AppStore and install openssl1.1"
         exit 1
     fi
     export PKG_CONFIG_PATH="${APPS_DIR}/openssl1.1/lib/pkgconfig"
@@ -298,6 +298,9 @@ config_files:
     label: php-fpm.conf
   - path: ${PHP_INSTALL_PATH}/etc/php-fpm.d/www.conf
     label: php-fpm.d/www.conf(FPM Pool)
+log_files:
+  - ${PHP_ERROR_LOG}
+  - ${PHP_FPM_ERROR_LOG}
 pid_file: ${PHP_FPM_PID}
 expose: unix:${PHP_FPM_SOCK}
 tags:

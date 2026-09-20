@@ -161,6 +161,11 @@ else
         log_info "下载 mysql: ${PKG_TARBALL}"
         download_file "https://mirrors.zap.cn/pkg/mysql/${PKG_TARBALL}" "${PKG_TARBALL}" || true
     fi
+    if [ ! -f "${PKG_TARBALL}" ]; then
+        log_error "下载 mysql 失败: ${PKG_TARBALL} 不存在"
+        exit 1
+    fi
+    log_info "解压 mysql: ${PKG_TARBALL} -> ${APPS_DIR}"
     tar xf "${PKG_TARBALL}" -C "${APPS_DIR}"
 
     # ── 安装目录（解压目录名含 glibc 标识，统一重命名为 mysql-版本） mysql-8.0 ──
@@ -174,22 +179,20 @@ else
 fi
 
 if [ "${SET_DEFAULT:-false}" = "true" ]; then
+    log_info "设置 mysql 命令为默认: /usr/local/bin/mysql"
     ln -sf "${INSTALL_DIR}/bin/mysql" /usr/local/bin/mysql
     ln -sf "${INSTALL_DIR}/bin/mysqldump" /usr/local/bin/mysqldump
     ln -sf "${INSTALL_DIR}/bin/myisamchk" /usr/local/bin/myisamchk
-    ln -sf "${INSTALL_DIR}/bin/mysqld_safe" /usr/local/bin/mysqld_safe
     ln -sf "${INSTALL_DIR}/bin/mysqlcheck" /usr/local/bin/mysqlcheck
 fi
 
-# 软链接到 /usr/local/mysql
 if [ ! -d "/usr/local/mysql" ]; then
+    log_info "Create soft link: /usr/local/mysql -> ${INSTALL_DIR}"
     ln -sf "${INSTALL_DIR}" /usr/local/mysql
 fi
 
-
-# ── 配置 ───────────────────────────────────────────────────
-# 只有确实存在配置时才备份（空目录不留一堆 .bak，重跑也不会重复备份）
 if [ -f "/etc/mysql/my.cnf" ]; then
+    log_info "backup /etc/mysql to /etc/mysql.bak.$(date +%Y%m%d%H%M%S)"
     mv /etc/mysql "/etc/mysql.bak.$(date +%Y%m%d%H%M%S)"
 fi
 mkdir -p /etc/mysql
@@ -205,7 +208,6 @@ if db_data_initialized "${DATA_DIR}"; then
     log_info "数据目录已初始化,跳过 mysqld --initialize-insecure（重跑不重复初始化,也不覆盖已有库）"
     DATA_REUSED=1
 else
-    # 半初始化残局：目录下有零散文件时 mysqld 拒绝初始化，先清掉
     remove_path "${DATA_DIR}"
     bin/mysqld --initialize-insecure --basedir=/usr/local/mysql --datadir=/usr/local/mysql/data --user=mysql
     DATA_REUSED=0
@@ -257,6 +259,7 @@ binlog_expire_logs_seconds = 604800
 EOF
 
 # ── 开机自启 ───────────────────────────────────────────────
+log_info "setup mysql service, enable auto start on boot"
 cp support-files/mysql.server /etc/init.d/mysql
 chmod +x /etc/init.d/mysql
 if command -v systemctl >/dev/null 2>&1; then
@@ -269,11 +272,10 @@ elif command -v chkconfig >/dev/null 2>&1; then
     chkconfig mysql on
     service mysql start
 fi
+log_ok "mysql service setup done"
 
 # ── 账号凭据（root / zapadm）──────────────────────────────
 # 密码统一由凭据库托管（/etc/zap/credentials/mysql_<user>.cred，0400 加密存储）：
-# 重装 / 升级时复用已有凭据，不重复生成
-# 注：本函数在命令替换 $() 内调用，日志一律走 stderr，避免污染取回的密码
 get_or_gen_cred() {
     local user="$1"
     if ! "${ZAPCTL}" cred exists mysql "${user}" >/dev/null 2>&1; then
@@ -301,6 +303,7 @@ printf '[client]\nuser = root\npassword = %s\n' "${MYSQL_ROOT_PASSWORD}" > "${RO
 
 # 等待 mysqld 就绪（最多 60s）
 # 复用已初始化的数据目录时 root 已有密码（来自同一凭据库），探活必须带凭据
+log_info "wait for mysqld ready (max 60s)"
 MYSQLD_READY=0
 for _ in $(seq 1 60); do
     if [ "${DATA_REUSED}" = "1" ]; then
@@ -321,18 +324,14 @@ if [ "${MYSQLD_READY}" -ne 1 ]; then
     exit 1
 fi
 
-# ── 设置 root 密码（接管 --initialize-insecure 产生的空密码 root）──
-# 复用已有数据目录时 root 密码早已设过（密码源同为凭据库），无需重复设置
+log_info "mysqld ready, set root password"
 if [ "${DATA_REUSED}" != "1" ]; then
     bin/mysql -u root <<SQL
 ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}';
 SQL
 fi
 
-# ── zapadm 面板账号 + 清除空密码（单次会话幂等执行）──────
-# CREATE IF NOT EXISTS + ALTER 保证重装 / 密码轮换后与凭据库一致；
-# DELETE 清除匿名账号（''@'localhost' 等），避免无密码旁路登录；
-# --defaults-extra-file 必须置于其它选项之前
+log_info "create zapadm user"
 bin/mysql --defaults-extra-file="${ROOT_CNF}" <<SQL
 CREATE USER IF NOT EXISTS 'zapadm'@'localhost' IDENTIFIED BY '${ZAPADM_PASSWORD}';
 ALTER USER 'zapadm'@'localhost' IDENTIFIED BY '${ZAPADM_PASSWORD}';
@@ -341,7 +340,6 @@ DELETE FROM mysql.user WHERE User = '';
 FLUSH PRIVILEGES;
 SQL
 
-# 安全校验 1：不得残留空密码账号（root/zapadm 已设密；锁定/系统账号除外）
 EMPTY_PW_USERS="$(bin/mysql --defaults-extra-file="${ROOT_CNF}" -N -B -e \
     "SELECT CONCAT(User, '@', Host) FROM mysql.user WHERE authentication_string = '' AND plugin IN ('mysql_native_password','caching_sha2_password') AND account_locked = 'N';")" \
     || { log_error "查询空密码账号失败"; exit 1; }
@@ -350,7 +348,7 @@ if [ -n "${EMPTY_PW_USERS}" ]; then
     exit 1
 fi
 
-# 安全校验 2：不带凭据的空密码连接必须失败
+log_info "check root login with empty password"
 if bin/mysql -u root -e "SELECT 1" </dev/null >/dev/null 2>&1; then
     log_error "root 空密码仍可登录，安全加固失败"
     exit 1
@@ -365,16 +363,18 @@ elif command -v service >/dev/null 2>&1; then
 fi
 log_info "mysql restart done"
 
-# ── 登记实例信息(apps/<category>/<name>/info.yaml,供「已安装」展示)──────
-# svc_name=mysql(systemd unit mysql.service),状态探测与面板启停走 systemctl;
-# pid_file 保留,作为无 systemd 环境下的兜底探活依据。
+log_info "write mysql info.yaml to ${APP_PATH}/info.yaml"
 ensure_dir "${APP_PATH}"
 cat > "${APP_PATH}/info.yaml" <<EOF
 svc_name: mysql
 instance: mysql-${MYSQL_SHORT_VERSION}
 install_dir: ${INSTALL_DIR}
+version: ${APP_VERSION}
 config_file: /etc/mysql/my.cnf
 pid_file: /var/run/mysqld/mysqld.pid
+log_files:
+  - /var/log/mysql/error.log
+  - /var/log/mysql/mysql-slow.log
 expose:
   - unix:/tmp/mysql.sock
   - tcp:127.0.0.1:3306

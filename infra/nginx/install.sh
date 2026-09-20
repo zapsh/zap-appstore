@@ -213,13 +213,19 @@ cat > "${APP_PATH}/info.yaml" <<'YAML'
 svc_name: nginx
 instance: nginx
 install_dir: __INSTALL_PATH__
+version: ${APP_VERSION}
 config_file: __INSTALL_PATH__/conf/nginx.conf
 config_files:
   - path: __INSTALL_PATH__/conf/nginx.conf
-    label: nginx.conf（主配置）
-  - path: __INSTALL_PATH__/conf/sites-enabled/default.conf
-    label: sites-enabled/default.conf（默认站点）
+    label: nginx.conf
+  - path: __INSTALL_PATH__/conf/fastcgi.conf
+    label: fastcgi.conf
+  - path: __INSTALL_PATH__/conf/mime.types
+    label: mime.types
 pid_file: /var/run/nginx.pid
+log_files:
+  - /var/log/nginx/error.log
+  - /var/log/nginx/access.log
 expose: tcp:80
 tags:
   - webserver

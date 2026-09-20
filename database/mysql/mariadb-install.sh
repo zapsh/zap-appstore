@@ -275,8 +275,12 @@ cat > "${APP_PATH}/info.yaml" <<EOF
 svc_name: mysql
 instance: mariadb-${MYSQL_SHORT_VERSION}
 install_dir: ${INSTALL_DIR}
+version: ${APP_VERSION}
 config_file: /etc/mysql/my.cnf
 pid_file: /var/run/mysqld/mysqld.pid
+log_files:
+  - /var/log/mysql/error.log
+  - /var/log/mysql/mysql-slow.log
 expose:
   - unix:/tmp/mysql.sock
   - tcp:127.0.0.1:3306

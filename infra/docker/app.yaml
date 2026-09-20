@@ -1,6 +1,6 @@
 name: docker
 title: Docker
-version: [latest,28.5.1,27.5.1,24.0.9]
+version: [28.5.1,27.5.1,24.0.9]
 license: Apache-2.0
 homepage: https://www.docker.com
 platforms:
@@ -29,9 +29,9 @@ options:
         default: official
         desc: 官方源在国内可能较慢，可改用阿里云镜像加速下载
         choices:
-          - label: get.docker.com（官方，默认）
+          - label: get.docker.com
             value: official
-          - label: 阿里云镜像（Aliyun）
+          - label: Aliyun Mirror（阿里云镜像加速）
             value: aliyun
       - name: INSTALL_CHANNEL
         label: 发布通道
