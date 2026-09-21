@@ -6,8 +6,6 @@ homepage: https://nginx.org
 platforms:
   - linux/amd64
   - linux/arm64
-  - freebsd/amd64
-  - freebsd/arm64
 category: infra
 description: Nginx is a web server and a reverse proxy server.
 icon: nginx.png
