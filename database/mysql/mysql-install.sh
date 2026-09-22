@@ -260,10 +260,12 @@ EOF
 
 # ── 开机自启 ───────────────────────────────────────────────
 log_info "setup mysql service, enable auto start on boot"
-cp support-files/mysql.server /etc/init.d/mysql
-chmod +x /etc/init.d/mysql
+if [ ! -d /etc/init.d ]; then
+    cp support-files/mysql.server /etc/init.d/mysql
+    chmod +x /etc/init.d/mysql
+fi
 if command -v systemctl >/dev/null 2>&1; then
-    cp -f "${ZAP_PATH}/scripts/systemd/mysql.service" /etc/systemd/system/mysql.service
+    cp -f "${PKG_PATH}/mysql.service" /etc/systemd/system/mysql.service
     systemctl daemon-reload
     systemctl enable mysql.service
     systemctl start mysql.service

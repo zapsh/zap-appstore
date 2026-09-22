@@ -1,0 +1,32 @@
+[Unit]
+Description=MySQL Server
+Documentation=man:mysqld(8)
+Documentation=https://dev.mysql.com/doc/refman/en/using-systemd.html
+After=network.target
+After=syslog.target
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=forking
+
+User=mysql
+Group=mysql
+
+PIDFile=/usr/local/mysql/data/mysqld.pid
+
+ExecStart=/usr/local/mysql/bin/mysqld_safe --datadir=/usr/local/mysql/data --pid-file=/usr/local/mysql/data/mysqld.pid
+
+ExecStop=/bin/kill -TERM $MAINPID
+
+ExecReload=/bin/kill -HUP $MAINPID
+
+TimeoutStartSec=900
+TimeoutStopSec=900
+
+Restart=on-failure
+RestartPreventExitStatus=1
+PrivateTmp=false
+
+LimitNOFILE=10000
