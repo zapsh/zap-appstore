@@ -159,7 +159,7 @@ else
     remove_path "${APPS_DIR}/${PKG_EXTRACT_DIR}"
     if [ ! -f "${PKG_TARBALL}" ]; then
         log_info "下载 mysql: ${PKG_TARBALL}"
-        download_file "https://mirrors.zap.cn/pkg/mysql/${PKG_TARBALL}" "${PKG_TARBALL}" || true
+        download_file "$(pkg_mirror)/mysql/${PKG_TARBALL}" "${PKG_TARBALL}" || true
     fi
     if [ ! -f "${PKG_TARBALL}" ]; then
         log_error "下载 mysql 失败: ${PKG_TARBALL} 不存在"

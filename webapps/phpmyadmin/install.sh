@@ -29,7 +29,7 @@ log_info "准备安装 ${APP_TITLE} "
 
 # ── 下载并解压 ──────────────────────────────────────────────
 ARCHIVE="phpMyAdmin-${APP_VERSION}-all-languages.tar.gz"
-URL="https://mirrors.zap.cn/pkg/webapps/${ARCHIVE}"
+URL="$(pkg_mirror)/webapps/${ARCHIVE}"
 
 rm -rf "${BUILD_PATH}"
 ensure_dir "${BUILD_PATH}"

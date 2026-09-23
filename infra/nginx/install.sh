@@ -20,14 +20,14 @@
 #   OPENSSL_VERSION= 捆绑编译的 OpenSSL 源码版本  默认 3.5.6
 #   OPENSSL_SRC_DIR= 已有 openssl 源码树路径(优先使用,跳过下载)
 #   ZLIB_VERSION   / PCRE2_VERSION              默认 1.3.1 / 10.48
-#   NGINX_MIRROR   = 镜像 base                  默认 https://mirrors.zap.cn/pkg
+#   NGINX_MIRROR   = 镜像 base                  默认取配置的下载源(见 bash_utils::pkg_mirror)
 #=============================================================================
 set -euo pipefail
 
 source "${ZAP_PATH}/scripts/zap/bash_utils.sh"
 
 # ── 可配置常量 ────────────────────────────────────────────────────────────
-NGINX_MIRROR="${NGINX_MIRROR:-https://mirrors.zap.cn/pkg}"
+NGINX_MIRROR="${NGINX_MIRROR:-$(pkg_mirror)}"
 ZLIB_VERSION="${ZLIB_VERSION:-1.3.1}"
 PCRE2_VERSION="${PCRE2_VERSION:-10.48}"
 OPENSSL_VERSION="${OPENSSL_VERSION:-3.5.6}"

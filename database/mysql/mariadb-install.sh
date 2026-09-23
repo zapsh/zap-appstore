@@ -113,7 +113,7 @@ else
         log_info "下载 mariadb: ${PKG_TARBALL}"
         # 统一走 bash_utils::download_file（curl --progress-bar / wget --show-progress）：
         # 非 TTY 下以 \r 原地刷新，日志里只占一行进度条，而非 wget 默认的逐行 dot 进度
-        download_file "https://mirrors.zap.cn/pkg/mariadb/${PKG_TARBALL}" "${PKG_TARBALL}"
+        download_file "$(pkg_mirror)/mariadb/${PKG_TARBALL}" "${PKG_TARBALL}"
     fi
     tar xf "${PKG_TARBALL}" -C "${APPS_DIR}"
     if [ ! -d "${INSTALL_DIR}" ]; then

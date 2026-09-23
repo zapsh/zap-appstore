@@ -12,7 +12,7 @@ cd "${PKG_PATH}"
 if [ ! -f "pcre2-${APP_VERSION}.tar.gz" ]; then
     # 统一走 bash_utils 下载器(curl -fsSL 静默优先、wget -q 回退,失败自动重试),
     # 避免裸 wget 的进度条刷屏;文件已存在(同快照内重跑)则跳过下载
-    download_file "https://mirrors.zap.cn/pkg/pcre2/pcre2-${APP_VERSION}.tar.gz" \
+    download_file "$(pkg_mirror)/pcre2/pcre2-${APP_VERSION}.tar.gz" \
         "pcre2-${APP_VERSION}.tar.gz"
 fi
 

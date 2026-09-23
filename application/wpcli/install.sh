@@ -29,20 +29,25 @@ WP_PHAR="${WP_DIR}/wp-cli.phar"
 ensure_dir "${WP_DIR}"
 
 # ── 下载 + 校验 ────────────────────────────────────────────
-if [ "${WP_CLI_PHAR_MIRROR}" = "zapsh" ]; then
-    log_info "使用自定义源下载 WP-CLI: ${WP_CLI_PHAR_MIRROR}"
-    WP_CLI_PHAR_URL="https://mirrors.zap.sh/pkg/wpcli/wp-cli.phar"
+# 默认走配置的下载源（pkg_mirror）：远端镜像与本地目录都支持；
+# 显式给 WP_CLI_PHAR_URL 时按老样子用官方源/自定义 URL。
+if [ -n "${WP_CLI_PHAR_URL:-}" ]; then
+    log_info "使用指定源下载 WP-CLI"
+elif [ "${WP_CLI_PHAR_MIRROR}" = "zapsh" ]; then
+    log_info "使用 Cloudflare 源下载 WP-CLI"
+    WP_CLI_PHAR_URL="$(pkg_mirror | sed 's|mirrors\.zap\.cn|mirrors.zap.sh|')/wpcli/wp-cli.phar"
 else
-    log_info "使用官方源下载 WP-CLI"
-    WP_CLI_PHAR_URL="https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar"
+    log_info "使用配置的下载源下载 WP-CLI"
+    WP_CLI_PHAR_URL="$(pkg_mirror)/wpcli/wp-cli.phar"
 fi
-PHAR_URL="${WP_CLI_PHAR_URL:-https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar}"
+PHAR_URL="${WP_CLI_PHAR_URL}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 
 log_info "下载 WP-CLI: ${PHAR_URL}"
-curl -fsSL --retry 3 -o "${TMP}/wp-cli.phar" "${PHAR_URL}"
-curl -fsSL --retry 3 -o "${TMP}/wp-cli.phar.sha512" "${PHAR_URL}.sha512"
+# 走 fetch_file 而非裸 curl：本地目录源（离线环境）时它直接拷贝
+download_file "${PHAR_URL}" "${TMP}/wp-cli.phar"
+download_file "${PHAR_URL}.sha512" "${TMP}/wp-cli.phar.sha512"
 
 EXPECT="$(awk '{print $1}' "${TMP}/wp-cli.phar.sha512" | tr 'A-Z' 'a-z')"
 ACTUAL="$(sha512sum "${TMP}/wp-cli.phar" | awk '{print $1}' | tr 'A-Z' 'a-z')"

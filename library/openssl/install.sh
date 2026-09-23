@@ -12,7 +12,7 @@
 #   (手动运行时若缺 MAJOR/MINOR,会从 APP_VERSION 自动推导)
 #
 # 可覆盖(环境变量):
-#   OPENSSL_MIRROR      镜像 base(末尾不带斜杠)  默认 https://mirrors.zap.cn/pkg/openssl
+#   OPENSSL_MIRROR      镜像 base(末尾不带斜杠)  默认取配置的下载源 + /openssl
 #   OPENSSL_ENABLE_WEAK 1 | 0  仅 OpenSSL 1.1.x 生效(3.x 无此编译开关),
 #                          默认 1 = 编译 enable-weak-ssl-ciphers(保持旧行为)
 #   OPENSSL_EXTRA_CONFIG    额外追加给 ./config 的参数(按空格分词追加)
@@ -27,7 +27,7 @@ if [ -z "${MAJOR_VERSION:-}" ]; then MAJOR_VERSION="${APP_VERSION%%.*}"; fi
 if [ -z "${MINOR_VERSION:-}" ]; then _ver_rest="${APP_VERSION#*.}"; MINOR_VERSION="${_ver_rest%%.*}"; fi
 SHORT_VERSION="${MAJOR_VERSION}.${MINOR_VERSION}"
 INSTALL_PATH="${APPS_DIR}/openssl${SHORT_VERSION}"
-OPENSSL_MIRROR="${OPENSSL_MIRROR:-https://mirrors.zap.cn/pkg/openssl}"
+OPENSSL_MIRROR="${OPENSSL_MIRROR:-$(pkg_mirror)/openssl}"
 OPENSSL_ENABLE_WEAK="${OPENSSL_ENABLE_WEAK:-1}"
 OPENSSL_EXTRA_CONFIG="${OPENSSL_EXTRA_CONFIG:-}"
 

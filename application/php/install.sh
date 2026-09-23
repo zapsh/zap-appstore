@@ -68,7 +68,7 @@ PHP_VERSION="${APP_VERSION}"
 # 由此派生出 目录 php-85 / 服务 php-fpm-85 / sock、pid php-fpm-85.sock、.pid,
 # 与 zapd/zapexec 的命名约定一致(php85 → /var/run/php-fpm-85.sock)。
 PHP_SHORT_VERSION="${MAJOR_VERSION}${MINOR_VERSION}"
-PHP_DOWNLOAD_URL="https://mirrors.zap.cn/pkg/php/php-${PHP_VERSION}.tar.gz"
+PHP_DOWNLOAD_URL="$(pkg_mirror)/php/php-${PHP_VERSION}.tar.gz"
 PHP_DOWNLOAD_NAME="php-${PHP_VERSION}.tar.gz"
 PHP_INSTALL_PATH="${APPS_DIR}/php-${PHP_SHORT_VERSION}"
 PHP_FPM_SOCK="/var/run/php-fpm-${PHP_SHORT_VERSION}.sock"
