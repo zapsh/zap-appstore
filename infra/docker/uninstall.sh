@@ -56,6 +56,47 @@ if [ "${BACKUP_CONFIG}" = "true" ]; then
     fi
 fi
 
+# ── 装的是 Podman 时走对应分支（两个运行时二选一）──────────
+#
+# 判定：系统里只有 podman、没有 docker —— 安装时选了 Podman 的情况。
+# 数据目录默认同样保留（/var/lib/containers），需勾选 PURGE_DATA 才删。
+if ! command -v docker >/dev/null 2>&1 && command -v podman >/dev/null 2>&1; then
+    log_info "检测到 Podman（未装 Docker），按 Podman 流程卸载…"
+    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+        systemctl stop podman.socket podman.service >/dev/null 2>&1 || true
+        systemctl disable podman.socket podman.service >/dev/null 2>&1 || true
+        log_info "已停止并禁用 podman.socket（systemd）"
+    fi
+    if is_os ubuntu debian; then
+        apt-get purge -y podman podman-compose >/dev/null 2>&1 \
+            || log_warn "部分包 purge 失败（可能未安装），继续清理残留"
+        apt-get autoremove -y --purge >/dev/null 2>&1 || true
+    elif is_os centos rhel rocky alma ol amazon fedora; then
+        if command -v dnf >/dev/null 2>&1; then PM="dnf"; else PM="yum"; fi
+        ${PM} remove -y podman podman-compose >/dev/null 2>&1 \
+            || log_warn "部分包移除失败（可能未安装），继续清理残留"
+    elif is_os alpine; then
+        apk del podman >/dev/null 2>&1 \
+            || log_warn "部分包移除失败（可能未安装），继续清理残留"
+    else
+        log_warn "未识别的发行版（${OS_NAME:-unknown}），跳过包管理器卸载，仅清理文件"
+    fi
+    rm -f /run/podman/podman.sock 2>/dev/null || true
+    if [ "${PURGE_DATA}" = "true" ]; then
+        for D in /var/lib/containers /var/lib/containers/storage; do
+            if [ -e "${D}" ]; then
+                rm -rf "${D}"
+                log_warn "已删除：${D}（镜像 / 容器 / 数据卷不可恢复）"
+            fi
+        done
+    elif [ -d /var/lib/containers ]; then
+        log_info "按要求保留 /var/lib/containers（镜像与容器数据仍在）"
+    fi
+    log_info "提示：面板「系统 → 运行环境」里的「容器运行时」如已设为 podman，请改回 auto 或 docker"
+    log_ok "Podman 已卸载"
+    exit 0
+fi
+
 # ── 卸载软件包 ─────────────────────────────────────────────
 if is_os ubuntu debian; then
     if command -v apt-get >/dev/null 2>&1; then

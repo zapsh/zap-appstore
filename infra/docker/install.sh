@@ -3,8 +3,9 @@
 #
 # 依赖环境变量（由 zapexec 注入）：ZAP_PATH APPS_DIR PKG_PATH APP_PATH APP_VERSION
 # 可选（options，值原样注入为同名环境变量）：
+#   INSTALL_RUNTIME   select —— docker（默认）/ podman，容器运行时
 #   INSTALL_MIRROR    select —— official（get.docker.com，默认）/ aliyun（--mirror Aliyun）
-#   INSTALL_CHANNEL   select —— stable（默认）/ test / nightly，Docker 发布通道
+#   INSTALL_CHANNEL   select —— stable（默认）/ test / nightly，Docker 发布通道（仅 docker）
 #   REGISTRY_MIRROR   string —— 镜像加速器地址，写入 /etc/docker/daemon.json
 #   DATA_ROOT         string —— 数据目录，默认 /var/lib/docker
 #   ENABLE_SERVICE    bool   —— "true" 时设置开机自启并立即启动（默认 true）
@@ -22,6 +23,9 @@ source "${ZAP_PATH}/scripts/zap/bash_utils.sh"
 
 assert_root || exit 1
 
+INSTALL_RUNTIME="${INSTALL_RUNTIME:-docker}"
+# Podman 的 API socket（面板的容器列表等 Engine API 能力走它）
+PODMAN_SOCK="/run/podman/podman.sock"
 INSTALL_MIRROR="${INSTALL_MIRROR:-official}"
 INSTALL_CHANNEL="${INSTALL_CHANNEL:-stable}"
 REGISTRY_MIRROR="${REGISTRY_MIRROR:-}"
@@ -35,6 +39,68 @@ log_info "系统：${OS_PRETTY:-${OS_NAME:-unknown}}，架构：${OS_ARCH_ALIAS:
 # ── 已安装检查（升级流程会先 uninstall 再 install，属正常）──
 if command -v docker >/dev/null 2>&1; then
     log_warn "检测到已存在 docker：$(docker --version 2>/dev/null || echo unknown)，将覆盖安装"
+fi
+
+# ── Podman 分支：没有守护进程、可 rootless，装完即结束 ──────
+#
+# 为什么单独一支：Podman 走系统包管理器而不是 get.docker.com，且面板的容器
+# 能力只有在 Podman 下才允许分配给普通用户（Docker 由 root 跑，无隔离）。
+if [ "${INSTALL_RUNTIME}" = "podman" ]; then
+    log_info "安装 Podman…"
+    if command -v podman >/dev/null 2>&1; then
+        log_warn "检测到已存在 podman：$(podman --version 2>/dev/null || echo unknown)，将覆盖安装"
+    fi
+    PKG_MGR="$(pkg_manager)" || PKG_MGR=""
+    if [ -z "${PKG_MGR}" ]; then
+        log_error "未识别的包管理器，无法安装 Podman"
+        exit 1
+    fi
+    if ! pkg_install_any "${PKG_MGR}" podman; then
+        log_error "Podman 安装失败（也可改用 Docker 运行时重装）"
+        exit 1
+    fi
+
+    # compose：Podman 5 自带 `podman compose`；更早版本靠 podman-compose 顶上
+    if ! podman compose version >/dev/null 2>&1; then
+        pkg_install_any "${PKG_MGR}" podman-compose \
+            || log_warn "podman-compose 不可用：Compose 项目需要 Podman 5+，或自行安装 podman-compose"
+    fi
+
+    # 面板的容器 API 走 podman.socket（compose 走 CLI，不受影响）
+    if [ "${ENABLE_SERVICE}" = "true" ]; then
+        if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+            if systemctl enable --now podman.socket >/dev/null 2>&1; then
+                log_info "已启用 podman.socket（面板 API 走 ${PODMAN_SOCK}）"
+            else
+                log_warn "podman.socket 启用失败，请手动执行：systemctl enable --now podman.socket"
+            fi
+        else
+            log_warn "非 systemd 系统，请自行启动 API 服务：podman system service --time=0 unix://${PODMAN_SOCK}"
+        fi
+    else
+        log_info "按要求未启用 podman.socket（ENABLE_SERVICE=false）"
+    fi
+
+    if ! command -v podman >/dev/null 2>&1; then
+        log_error "Podman 安装失败：未找到 podman 命令"
+        exit 1
+    fi
+
+    ensure_dir "${APP_PATH}"
+    cat > "${APP_PATH}/info.yaml" <<EOF
+svc_name: podman
+instance: podman
+install_dir: /usr/bin
+config_file: /etc/containers/containers.conf
+expose:
+    unix:${PODMAN_SOCK}
+runtime: podman
+version: ${APP_VERSION:-latest}
+EOF
+
+    log_ok "Podman 安装成功：$(podman --version 2>/dev/null || echo unknown)"
+    log_info "请到面板「系统 → 运行环境」把「容器运行时」设为 podman：Docker 下容器由 root 运行，面板不会把容器能力分配给普通用户"
+    exit 0
 fi
 
 # ── 下载官方便捷安装脚本 ───────────────────────────────────

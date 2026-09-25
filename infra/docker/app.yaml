@@ -23,6 +23,16 @@ options:
       and starts the service. Re-running it is safe — zap's upgrade flow runs uninstall
       first, then install.
     items:
+      - name: INSTALL_RUNTIME
+        label: 容器运行时
+        type: select
+        default: docker
+        desc: Docker 为常见选择；Podman 无守护进程、可 rootless，面板只在 Podman 下把容器能力分配给普通用户（Docker 下容器由 root 运行，没有用户隔离）
+        choices:
+          - label: Docker（默认）
+            value: docker
+          - label: Podman（无守护进程 / 可 rootless）
+            value: podman
       - name: INSTALL_MIRROR
         label: 安装源
         type: select
