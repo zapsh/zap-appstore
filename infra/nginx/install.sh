@@ -31,6 +31,14 @@ NGINX_MIRROR="${NGINX_MIRROR:-$(pkg_mirror)}"
 ZLIB_VERSION="${ZLIB_VERSION:-1.3.1}"
 PCRE2_VERSION="${PCRE2_VERSION:-10.48}"
 OPENSSL_VERSION="${OPENSSL_VERSION:-3.5.6}"
+# ModSecurity(WAF,安装选项 MODSECURITY=true 时启用)
+MODSEC_VERSION="${MODSEC_VERSION:-3.0.14}"
+MODSEC_CRS_VERSION="${MODSEC_CRS_VERSION:-4.6.0}"
+MODSEC_PREFIX="${MODSEC_PREFIX:-/usr/local/modsecurity}"
+case "$(echo "${MODSECURITY:-false}" | tr '[:upper:]' '[:lower:]')" in
+    true | 1 | yes | on) WAF_ENABLED=1 ;;
+    *) WAF_ENABLED=0 ;;
+esac
 
 INSTALL_PATH="${APPS_DIR}/nginx-${APP_VERSION}"
 NGINX_SRC="nginx-${APP_VERSION}"
@@ -87,6 +95,60 @@ if [ -d "${INSTALL_PATH}" ]; then
     rm -rf "${INSTALL_PATH}"
 fi
 
+# ── ModSecurity(WAF,可选):规则引擎 + nginx 连接器 ───────────────────────
+# 动态模块只能在编译时加入:nginx 必须带 --with-compat,否则模块签名不匹配、
+# load_module 会被拒。已装好的 nginx 无法后期加装,所以这是唯一的时机。
+if [ "${WAF_ENABLED}" = "1" ]; then
+    log_info "安装选项:编译 ModSecurity(WAF) 支持 ..."
+    # 1) 构建依赖(apt 系显式安装;其它发行版假定已具备,装不上也不致命)
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq || true
+        apt-get install -y -qq --no-install-recommends libtool autoconf automake g++ make \
+            pkg-config libpcre3-dev libxml2-dev libcurl4-openssl-dev libgeoip-dev \
+            libyajl-dev flex bison || true
+    fi
+    # 2) libmodsecurity(规则引擎)
+    cd "${PKG_PATH}"
+    if [ ! -f "libmodsecurity-v${MODSEC_VERSION}.tar.gz" ]; then
+        fetch_file "https://github.com/owasp-modsecurity/ModSecurity/releases/download/v${MODSEC_VERSION}/libmodsecurity-v${MODSEC_VERSION}.tar.gz" \
+            "libmodsecurity-v${MODSEC_VERSION}.tar.gz" || {
+            log_error "libmodsecurity 源码下载失败,中止(取消该选项可继续安装纯 nginx)"
+            exit 1
+        }
+    fi
+    tar -xzf "libmodsecurity-v${MODSEC_VERSION}.tar.gz" -C "${BUILD_PATH}"
+    (
+        cd "${BUILD_PATH}/ModSecurity-${MODSEC_VERSION}" &&
+            ./build.sh &&
+            ./configure --prefix="${MODSEC_PREFIX}" --without-lmdb &&
+            make -j "${CPU_NUM:-$(cpu_count)}" &&
+            make install
+    ) || {
+        log_error "libmodsecurity 编译失败,中止"
+        exit 1
+    }
+    # nginx 启动时靠 ldconfig 找 libmodsecurity.so.3
+    echo "${MODSEC_PREFIX}/lib" >/etc/ld.so.conf.d/zap-modsecurity.conf
+    echo "${MODSEC_PREFIX}/lib64" >>/etc/ld.so.conf.d/zap-modsecurity.conf
+    ldconfig || true
+    if ! ldconfig -p | grep -q libmodsecurity; then
+        log_error "libmodsecurity 未进入动态库缓存,中止"
+        exit 1
+    fi
+    # 3) ModSecurity-nginx 连接器(动态模块源码)
+    if [ ! -f "ModSecurity-nginx.tar.gz" ]; then
+        fetch_file "https://github.com/owasp-modsecurity/ModSecurity-nginx/archive/refs/heads/v3/master.tar.gz" \
+            "ModSecurity-nginx.tar.gz" || {
+            log_error "ModSecurity-nginx 连接器下载失败,中止"
+            exit 1
+        }
+    fi
+    MODSEC_CONNECTOR_DIR="${BUILD_PATH}/ModSecurity-nginx"
+    mkdir -p "${MODSEC_CONNECTOR_DIR}"
+    tar -xzf "ModSecurity-nginx.tar.gz" -C "${MODSEC_CONNECTOR_DIR}" --strip-components=1
+    log_ok "libmodsecurity ${MODSEC_VERSION} 与连接器就绪"
+fi
+
 # ── configure:常规模块 + 依赖 ─────────────────────────────────────────────
 log_info "开始编译 nginx-${APP_VERSION}(OpenSSL ${OPENSSL_VERSION}) ..."
 cd "${BUILD_PATH}/${NGINX_SRC}"
@@ -139,6 +201,10 @@ if [ -n "${MODULES:-}" ]; then
     read -r -a module_args <<< "${MODULES}"
     configure_args+=("${module_args[@]}")
 fi
+if [ "${WAF_ENABLED}" = "1" ]; then
+    # --with-compat 是动态模块的前提(模块签名匹配),缺了它 load_module 会直接被拒
+    configure_args+=(--with-compat --add-dynamic-module="${MODSEC_CONNECTOR_DIR}")
+fi
 
 log_info "configure ..."
 ./configure "${configure_args[@]}"
@@ -166,6 +232,61 @@ fi
 # 确保模板引用的 mime.types 存在(make install 通常已生成)
 if [ ! -f "${INSTALL_PATH}/conf/mime.types" ] && [ -f "${BUILD_PATH}/${NGINX_SRC}/conf/mime.types" ]; then
     cp -f "${BUILD_PATH}/${NGINX_SRC}/conf/mime.types" "${INSTALL_PATH}/conf/mime.types"
+fi
+
+# ── ModSecurity:部署 OWASP CRS 并启用(默认只记录不拦截) ────────────────
+if [ "${WAF_ENABLED}" = "1" ]; then
+    log_info "部署 OWASP CRS 规则集 ..."
+    MODSEC_WAF_CONF="${INSTALL_PATH}/conf/modsecurity.d"
+    cd "${PKG_PATH}"
+    if [ ! -f "coreruleset-${MODSEC_CRS_VERSION}.tar.gz" ]; then
+        fetch_file "https://github.com/coreruleset/coreruleset/archive/refs/tags/v${MODSEC_CRS_VERSION}.tar.gz" \
+            "coreruleset-${MODSEC_CRS_VERSION}.tar.gz" || {
+            log_error "OWASP CRS 下载失败,中止"
+            exit 1
+        }
+    fi
+    ensure_dir "${MODSEC_WAF_CONF}/rules"
+    tar -xzf "coreruleset-${MODSEC_CRS_VERSION}.tar.gz" -C "${MODSEC_WAF_CONF}" --strip-components=1
+    if [ ! -f "${MODSEC_WAF_CONF}/crs-setup.conf" ] && [ -f "${MODSEC_WAF_CONF}/crs-setup.conf.example" ]; then
+        cp -f "${MODSEC_WAF_CONF}/crs-setup.conf.example" "${MODSEC_WAF_CONF}/crs-setup.conf"
+    fi
+
+    # 主配置:DetectionOnly —— 装完先看审计日志,确认没误杀业务再改 On
+    cat >"${MODSEC_WAF_CONF}/modsecurity.conf" <<EOF
+# zap 生成:ModSecurity 主配置(OWASP CRS ${MODSEC_CRS_VERSION})
+SecRuleEngine DetectionOnly
+SecRequestBodyAccess On
+SecAuditEngine RelevantOnly
+SecAuditLogRelevantStatus "^(?:5|4(?!04))"
+SecAuditLogParts ABIJDEFHZ
+SecAuditLogType Serial
+SecAuditLog /var/log/modsec_audit.log
+Include ${MODSEC_WAF_CONF}/crs-setup.conf
+Include ${MODSEC_WAF_CONF}/rules/*.conf
+EOF
+
+    # http 上下文指令单独成文件(主配置已 include conf.d/*.conf),不动模板
+    cat >"${INSTALL_PATH}/conf/conf.d/modsecurity.conf" <<EOF
+# zap 生成:WAF 启用(http 上下文)
+modsecurity on;
+modsecurity_rules_file ${MODSEC_WAF_CONF}/modsecurity.conf;
+EOF
+
+    # load_module 必须在 nginx.conf 最外层顶部
+    if ! grep -q "ngx_http_modsecurity_module.so" "${INSTALL_PATH}/conf/nginx.conf"; then
+        sed -i "1i load_module modules/ngx_http_modsecurity_module.so;" "${INSTALL_PATH}/conf/nginx.conf"
+    fi
+
+    # 兜底:WAF 只要让 nginx 起不来就撤掉它 —— nginx 本体必须可用
+    if ! "${INSTALL_PATH}/sbin/nginx" -t >/dev/null 2>&1; then
+        log_error "WAF 配置未通过 nginx -t,已移除 WAF 配置(nginx 仍可用):"
+        "${INSTALL_PATH}/sbin/nginx" -t || true
+        rm -f "${INSTALL_PATH}/conf/conf.d/modsecurity.conf"
+        sed -i "/ngx_http_modsecurity_module.so/d" "${INSTALL_PATH}/conf/nginx.conf"
+    else
+        log_ok "WAF 就绪:模块已加载,引擎 DetectionOnly(审计日志 /var/log/modsec_audit.log)"
+    fi
 fi
 
 # ── 版本软链 ──────────────────────────────────────────────────────────────

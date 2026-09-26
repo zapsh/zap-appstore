@@ -44,6 +44,11 @@ options:
           value: --with-http_limit_conn_module
         - label: IPv6
           value: --with-ipv6
+    - name: MODSECURITY
+      label: ModSecurity(WAF)
+      type: bool
+      default: false
+      desc: 编译 libmodsecurity 与 ModSecurity 动态模块,并部署 OWASP CRS 规则集(默认只记录不拦截)。动态模块只能在编译时加入,已装好的 nginx 无法后期加装
     - name: EXTRA_CONFIG
       label: 额外 configure 参数
       type: string
