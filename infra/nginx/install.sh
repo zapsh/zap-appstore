@@ -20,6 +20,8 @@
 #   OPENSSL_VERSION= 捆绑编译的 OpenSSL 源码版本  默认 3.5.6
 #   OPENSSL_SRC_DIR= 已有 openssl 源码树路径(优先使用,跳过下载)
 #   ZLIB_VERSION   / PCRE2_VERSION              默认 1.3.1 / 10.48
+#   MODSEC_LIB_TARBALL / MODSEC_CONNECTOR_TARBALL / MODSEC_CRS_TARBALL
+#        = 下载源 modsecurity/ 下的实际包名(默认见下方常量,只填文件名)
 #   NGINX_MIRROR   = 镜像 base                  默认取配置的下载源(见 bash_utils::pkg_mirror)
 #=============================================================================
 set -euo pipefail
@@ -32,9 +34,13 @@ ZLIB_VERSION="${ZLIB_VERSION:-1.3.1}"
 PCRE2_VERSION="${PCRE2_VERSION:-10.48}"
 OPENSSL_VERSION="${OPENSSL_VERSION:-3.5.6}"
 # ModSecurity(WAF,安装选项 MODSECURITY=true 时启用)
-MODSEC_VERSION="${MODSEC_VERSION:-3.0.14}"
-MODSEC_CRS_VERSION="${MODSEC_CRS_VERSION:-4.6.0}"
+MODSEC_VERSION="${MODSEC_VERSION:-3.0.16}"
+MODSEC_CONNECTOR_VERSION="${MODSEC_CONNECTOR_VERSION:-1.0.4}"
+MODSEC_CRS_VERSION="${MODSEC_CRS_VERSION:-4.29.0}"
 MODSEC_PREFIX="${MODSEC_PREFIX:-/usr/local/modsecurity}"
+# 规则与主配置落面板自有的 nginx 目录(与四层转发的 zap-stream.conf 同级):
+# 重装 / 升级 nginx 都不会把规则带走
+MODSEC_WAF_CONF="/etc/zap/nginx/modsecurity"
 case "$(echo "${MODSECURITY:-false}" | tr '[:upper:]' '[:lower:]')" in
     true | 1 | yes | on) WAF_ENABLED=1 ;;
     *) WAF_ENABLED=0 ;;
@@ -45,6 +51,10 @@ NGINX_SRC="nginx-${APP_VERSION}"
 ZLIB_SRC="zlib-${ZLIB_VERSION}"
 PCRE2_SRC="pcre2-${PCRE2_VERSION}"
 OPENSSL_SRC="openssl-${OPENSSL_VERSION}"
+# ModSecurity:下载源 modsecurity/ 下的固定包名(镜像命名不统一时用环境变量覆盖)
+MODSEC_LIB_PKG="${MODSEC_LIB_TARBALL:-modsecurity-v${MODSEC_VERSION}.tar.gz}"
+MODSEC_CONN_PKG="${MODSEC_CONNECTOR_TARBALL:-ModSecurity-nginx-v${MODSEC_CONNECTOR_VERSION}.tar.gz}"
+MODSEC_CRS_PKG="${MODSEC_CRS_TARBALL:-coreruleset-${MODSEC_CRS_VERSION}-minimal.tar.gz}"
 
 # ── 前置:用户 / 目录 / 首次系统依赖 ─────────────────────────────────────
 prepare_install_env www
@@ -95,32 +105,146 @@ if [ -d "${INSTALL_PATH}" ]; then
     rm -rf "${INSTALL_PATH}"
 fi
 
+# ── ModSecurity 构建依赖(按发行版取包名) ──────────────────────────────────
+# 复用 bash_utils 的 pkg_manager / pkg_install_any:apt / dnf / yum / apk / zypper
+# 全覆盖,不像只认 apt 的写法那样在非 deb 系上默认"假定已具备"。
+# 装不上只告警、不中止:缺头文件会在 libmodsecurity 的 configure 阶段暴露,
+# 不该因为某个发行版改了包名就让整次 nginx 安装失败(与 install_system_deps 同一取向)。
+install_modsec_deps() {
+    local pm common="" p rc=0
+    pm="$(pkg_manager)" || {
+        log_warn "未识别到包管理器(${OS_NAME:-unknown}),跳过 ModSecurity 构建依赖安装"
+        return 1
+    }
+    case "${pm}" in
+    apt)
+        apt-get update -qq >/dev/null 2>&1 || true
+        common="libtool autoconf automake g++ make pkg-config flex bison libxml2-dev libyajl-dev"
+        ;;
+    dnf | yum)
+        common="libtool autoconf automake gcc-c++ make pkgconfig flex bison libxml2-devel yajl-devel"
+        ;;
+    apk)
+        common="build-base autoconf automake libtool flex bison pkgconf libxml2-dev yajl-dev"
+        ;;
+    zypper)
+        common="libtool autoconf automake gcc-c++ make pkg-config flex bison libxml2-devel yajl-devel"
+        ;;
+    esac
+
+    log_info "${pm} 安装 ModSecurity 构建依赖 ..."
+    # 先批量,失败再逐项补装(个别包缺失忽略)—— 与 install_system_deps 同一套路
+    case "${pm}" in
+    apt) DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${common} >/dev/null 2>&1 ;;
+    apk) apk add --no-cache ${common} >/dev/null 2>&1 ;;
+    *) "${pm}" install -y ${common} >/dev/null 2>&1 ;;
+    esac || {
+        log_warn "批量安装失败,逐项补装 ..."
+        for p in ${common}; do
+            pkg_install_any "${pm}" "${p}" || rc=1
+        done
+    }
+
+    # 版本间最容易改名的几个:逐个给候选,装上任意一个即可
+    #   pcre : modsecurity 3.x 只认 pcre2(pcre3 没有 pcre2.h → 编译期 fatal error),
+    #          故 pcre2 优先;pcre3 仅作老系统的退路
+    #   curl : deb 系三个实现包(openssl/gnutls/通用)名字不一样
+    #   geoip: 可选依赖(GeoIP 支持),老包在新系统上已被移除 → 装不上不算失败
+    case "${pm}" in
+    apt)
+        pkg_install_any "${pm}" libpcre2-dev libpcre3-dev || rc=1
+        pkg_install_any "${pm}" libcurl4-openssl-dev libcurl4-gnutls-dev libcurl-dev || rc=1
+        pkg_install_any "${pm}" libgeoip-dev libmaxminddb-dev || true
+        ;;
+    dnf | yum)
+        pkg_install_any "${pm}" pcre2-devel pcre-devel || rc=1
+        pkg_install_any "${pm}" libcurl-devel || rc=1
+        pkg_install_any "${pm}" GeoIP-devel libmaxminddb-devel || true
+        ;;
+    apk)
+        pkg_install_any "${pm}" pcre2-dev pcre-dev || rc=1
+        pkg_install_any "${pm}" curl-dev || rc=1
+        ;;
+    zypper)
+        pkg_install_any "${pm}" pcre2-devel pcre-devel || rc=1
+        pkg_install_any "${pm}" libcurl-devel || rc=1
+        ;;
+    esac
+
+    if [ "${rc}" -eq 0 ]; then
+        log_ok "ModSecurity 构建依赖就绪"
+    else
+        log_warn "部分构建依赖未装上,若 libmodsecurity 编译报缺头文件/库请手动补装"
+    fi
+    return "${rc}"
+}
+
+# ── pcre2:libmodsecurity 的硬依赖 ────────────────────────────────────────
+# modsecurity 3.x 一律 #include <pcre2.h>,pcre3 开发包里没有这个头文件,
+# 于是编译 transaction.cc 时直接 fatal error。系统开发包优先;系统里没有
+# (离线源 / 老发行版)就用 build 里那份 pcre2 源码编一份 —— 它正是 nginx
+# --with-pcre 要用的源码树,两边版本天然一致。--disable-shared + --with-pic
+# 让它静态链进 libmodsecurity.so,运行时不额外依赖系统的 libpcre2。
+# 注意:结果经全局变量返回,**不要**写成 OPT="$(modsec_pcre2_option)" ——
+# log_info 打的是 stdout,命令替换会把日志连同时间戳一起吞进变量,
+# 于是 configure 收到 "[2026-09-26 ..." 当 build system type,直接 config.sub 报错。
+modsec_pcre2_option() {   # 设置 MODSEC_PCRE2_OPT(系统已有 pcre2 时为空);失败返回 1
+    MODSEC_PCRE2_OPT=""
+    if [ -f /usr/include/pcre2.h ] || [ -f /usr/local/include/pcre2.h ] \
+        || pkg-config --exists libpcre2-8 2>/dev/null; then
+        return 0
+    fi
+    local src="${BUILD_PATH}/${PCRE2_SRC}" stage="${BUILD_PATH}/pcre2-stage"
+    log_info "系统缺 pcre2 头文件,用 ${PCRE2_SRC} 源码编译一份给 libmodsecurity ..."
+    if [ ! -f "${stage}/include/pcre2.h" ]; then
+        ( cd "${src}" &&
+            ./configure --prefix="${stage}" --disable-shared --with-pic >/dev/null 2>&1 &&
+            make -j "${CPU_NUM:-$(cpu_count)}" >/dev/null 2>&1 &&
+            make install >/dev/null 2>&1 ) || {
+            log_error "pcre2 源码编译失败,libmodsecurity 缺 pcre2.h 无法继续"
+            return 1
+        }
+    fi
+    MODSEC_PCRE2_OPT="--with-pcre2=${stage}"
+    return 0
+}
+
 # ── ModSecurity(WAF,可选):规则引擎 + nginx 连接器 ───────────────────────
 # 动态模块只能在编译时加入:nginx 必须带 --with-compat,否则模块签名不匹配、
 # load_module 会被拒。已装好的 nginx 无法后期加装,所以这是唯一的时机。
 if [ "${WAF_ENABLED}" = "1" ]; then
     log_info "安装选项:编译 ModSecurity(WAF) 支持 ..."
-    # 1) 构建依赖(apt 系显式安装;其它发行版假定已具备,装不上也不致命)
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq || true
-        apt-get install -y -qq --no-install-recommends libtool autoconf automake g++ make \
-            pkg-config libpcre3-dev libxml2-dev libcurl4-openssl-dev libgeoip-dev \
-            libyajl-dev flex bison || true
-    fi
-    # 2) libmodsecurity(规则引擎)
+    # 1) 构建依赖:按发行版装(apt / dnf / yum / apk / zypper),装不全只告警
+    install_modsec_deps || true
+    # 2) libmodsecurity(规则引擎):与 pcre2 一样,从下载源按固定包名直接取,不走 GitHub
     cd "${PKG_PATH}"
-    if [ ! -f "libmodsecurity-v${MODSEC_VERSION}.tar.gz" ]; then
-        fetch_file "https://github.com/owasp-modsecurity/ModSecurity/releases/download/v${MODSEC_VERSION}/libmodsecurity-v${MODSEC_VERSION}.tar.gz" \
-            "libmodsecurity-v${MODSEC_VERSION}.tar.gz" || {
+    if [ ! -f "${MODSEC_LIB_PKG}" ]; then
+        log_info "download ${MODSEC_LIB_PKG}"
+        fetch_file "${NGINX_MIRROR}/modsecurity/${MODSEC_LIB_PKG}" "${MODSEC_LIB_PKG}" || {
             log_error "libmodsecurity 源码下载失败,中止(取消该选项可继续安装纯 nginx)"
             exit 1
         }
     fi
-    tar -xzf "libmodsecurity-v${MODSEC_VERSION}.tar.gz" -C "${BUILD_PATH}"
+    # libmodsecurity 强制依赖 pcre2:先落实(系统包 → 源码兜底),拿不到就别浪费
+    # 几分钟编译,直接中止
+    if ! modsec_pcre2_option; then
+        log_error "libmodsecurity 需要 pcre2,请安装 libpcre2-dev(deb)/pcre2-devel(rpm)"
+        exit 1
+    fi
+    # 顶层目录名随包而异(libmodsecurity-vX / ModSecurity-vX …),从包里读出来,不猜。
+    # 不能用 `tar -tzf x | head -1`:包内条目 6000+/500KB,head 读一行就退出,tar 接着
+    # 写管道必吃 SIGPIPE,开着 pipefail 时整条管道判 141,set -e 于是把安装直接干掉。
+    # 改用 sed(不提前退出,让 tar 把话说完),失败也留一句能看懂的话。
+    MODSEC_SRC="$(tar -tzf "${MODSEC_LIB_PKG}" | sed -n '1{s|/.*||;p;}')"
+    if [ -z "${MODSEC_SRC}" ]; then
+        log_error "从 ${MODSEC_LIB_PKG} 读不出顶层目录名(包损坏?)"
+        exit 1
+    fi
+    tar -xzf "${MODSEC_LIB_PKG}" -C "${BUILD_PATH}"
     (
-        cd "${BUILD_PATH}/ModSecurity-${MODSEC_VERSION}" &&
+        cd "${BUILD_PATH}/${MODSEC_SRC}" &&
             ./build.sh &&
-            ./configure --prefix="${MODSEC_PREFIX}" --without-lmdb &&
+            ./configure --prefix="${MODSEC_PREFIX}" --without-lmdb ${MODSEC_PCRE2_OPT} &&
             make -j "${CPU_NUM:-$(cpu_count)}" &&
             make install
     ) || {
@@ -129,23 +253,30 @@ if [ "${WAF_ENABLED}" = "1" ]; then
     }
     # nginx 启动时靠 ldconfig 找 libmodsecurity.so.3
     echo "${MODSEC_PREFIX}/lib" >/etc/ld.so.conf.d/zap-modsecurity.conf
-    echo "${MODSEC_PREFIX}/lib64" >>/etc/ld.so.conf.d/zap-modsecurity.conf
+    if [ -d "${MODSEC_PREFIX}/lib64" ]; then
+        echo "${MODSEC_PREFIX}/lib64" >>/etc/ld.so.conf.d/zap-modsecurity.conf
+    fi
     ldconfig || true
-    if ! ldconfig -p | grep -q libmodsecurity; then
-        log_error "libmodsecurity 未进入动态库缓存,中止"
+    # soname 要写全:have_lib 是按 soname 精确/通配匹配的,只写 libmodsecurity
+    # 匹配不上 libmodsecurity.so.3(缓存里没有叫这个名字的条目),它的文件系统兜底
+    # 也只扫默认目录、不含 ${MODSEC_PREFIX}/lib → 库明明在也会被判成没装。
+    # 再补一道文件检查:容器里 ldconfig 未必生效,库是自己刚装的,路径是确定的。
+    if ! have_lib 'libmodsecurity.so.*' \
+        && ! ls "${MODSEC_PREFIX}"/lib/libmodsecurity.so* >/dev/null 2>&1; then
+        log_error "libmodsecurity 未装到 ${MODSEC_PREFIX}/lib,中止"
         exit 1
     fi
     # 3) ModSecurity-nginx 连接器(动态模块源码)
-    if [ ! -f "ModSecurity-nginx.tar.gz" ]; then
-        fetch_file "https://github.com/owasp-modsecurity/ModSecurity-nginx/archive/refs/heads/v3/master.tar.gz" \
-            "ModSecurity-nginx.tar.gz" || {
+    if [ ! -f "${MODSEC_CONN_PKG}" ]; then
+        log_info "download ${MODSEC_CONN_PKG}"
+        fetch_file "${NGINX_MIRROR}/modsecurity/${MODSEC_CONN_PKG}" "${MODSEC_CONN_PKG}" || {
             log_error "ModSecurity-nginx 连接器下载失败,中止"
             exit 1
         }
     fi
     MODSEC_CONNECTOR_DIR="${BUILD_PATH}/ModSecurity-nginx"
     mkdir -p "${MODSEC_CONNECTOR_DIR}"
-    tar -xzf "ModSecurity-nginx.tar.gz" -C "${MODSEC_CONNECTOR_DIR}" --strip-components=1
+    tar -xzf "${MODSEC_CONN_PKG}" -C "${MODSEC_CONNECTOR_DIR}" --strip-components=1
     log_ok "libmodsecurity ${MODSEC_VERSION} 与连接器就绪"
 fi
 
@@ -226,9 +357,11 @@ if [ ! -f "${INSTALL_PATH}/conf/dhparam.pem" ]; then
 fi
 
 cp -f "${ZAP_PATH}/scripts/zap/conf/nginx.conf" "${INSTALL_PATH}/conf/nginx.conf"
-if [ ! -f "${INSTALL_PATH}/conf/sites-enabled/default.conf" ]; then
-    cp -f "${ZAP_PATH}/scripts/zap/conf/default.conf" "${INSTALL_PATH}/conf/sites-enabled/default.conf"
-fi
+# 默认站点不再由安装脚本下发:面板把它托管在
+# /etc/zap/webservers/nginx/sites-enabled/00-default.conf(stub_status 状态页也挂在
+# 那儿)。这里再放一份 default.conf,两份都写 listen 80 default_server →
+# nginx -t 直接 [emerg] duplicate default server,安装完起不来。
+# 空目录无妨:nginx.conf 里的 include sites-enabled/*.conf 是通配,匹配不到不报错。
 # 确保模板引用的 mime.types 存在(make install 通常已生成)
 if [ ! -f "${INSTALL_PATH}/conf/mime.types" ] && [ -f "${BUILD_PATH}/${NGINX_SRC}/conf/mime.types" ]; then
     cp -f "${BUILD_PATH}/${NGINX_SRC}/conf/mime.types" "${INSTALL_PATH}/conf/mime.types"
@@ -237,34 +370,39 @@ fi
 # ── ModSecurity:部署 OWASP CRS 并启用(默认只记录不拦截) ────────────────
 if [ "${WAF_ENABLED}" = "1" ]; then
     log_info "部署 OWASP CRS 规则集 ..."
-    MODSEC_WAF_CONF="${INSTALL_PATH}/conf/modsecurity.d"
+    ensure_dir "${MODSEC_WAF_CONF}"
     cd "${PKG_PATH}"
-    if [ ! -f "coreruleset-${MODSEC_CRS_VERSION}.tar.gz" ]; then
-        fetch_file "https://github.com/coreruleset/coreruleset/archive/refs/tags/v${MODSEC_CRS_VERSION}.tar.gz" \
-            "coreruleset-${MODSEC_CRS_VERSION}.tar.gz" || {
+    if [ ! -f "${MODSEC_CRS_PKG}" ]; then
+        log_info "download ${MODSEC_CRS_PKG}"
+        fetch_file "${NGINX_MIRROR}/modsecurity/${MODSEC_CRS_PKG}" "${MODSEC_CRS_PKG}" || {
             log_error "OWASP CRS 下载失败,中止"
             exit 1
         }
     fi
     ensure_dir "${MODSEC_WAF_CONF}/rules"
-    tar -xzf "coreruleset-${MODSEC_CRS_VERSION}.tar.gz" -C "${MODSEC_WAF_CONF}" --strip-components=1
+    tar -xzf "${MODSEC_CRS_PKG}" -C "${MODSEC_WAF_CONF}" --strip-components=1
     if [ ! -f "${MODSEC_WAF_CONF}/crs-setup.conf" ] && [ -f "${MODSEC_WAF_CONF}/crs-setup.conf.example" ]; then
         cp -f "${MODSEC_WAF_CONF}/crs-setup.conf.example" "${MODSEC_WAF_CONF}/crs-setup.conf"
     fi
 
     # 主配置:DetectionOnly —— 装完先看审计日志,确认没误杀业务再改 On
-    cat >"${MODSEC_WAF_CONF}/modsecurity.conf" <<EOF
-# zap 生成:ModSecurity 主配置(OWASP CRS ${MODSEC_CRS_VERSION})
-SecRuleEngine DetectionOnly
-SecRequestBodyAccess On
-SecAuditEngine RelevantOnly
-SecAuditLogRelevantStatus "^(?:5|4(?!04))"
-SecAuditLogParts ABIJDEFHZ
-SecAuditLogType Serial
-SecAuditLog /var/log/modsec_audit.log
-Include ${MODSEC_WAF_CONF}/crs-setup.conf
-Include ${MODSEC_WAF_CONF}/rules/*.conf
-EOF
+    # Include 写成条件式:一个缺失的文件就能让 nginx -t 直接失败,不值得赌
+    {
+        echo "# zap 生成:ModSecurity 主配置(OWASP CRS ${MODSEC_CRS_VERSION})"
+        echo "SecRuleEngine DetectionOnly"
+        echo "SecRequestBodyAccess On"
+        echo "SecAuditEngine RelevantOnly"
+        echo 'SecAuditLogRelevantStatus "^(?:5|4(?!04))"'
+        echo "SecAuditLogParts ABIJDEFHZ"
+        echo "SecAuditLogType Serial"
+        echo "SecAuditLog /var/log/modsec_audit.log"
+        if [ -f "${MODSEC_WAF_CONF}/crs-setup.conf" ]; then
+            echo "Include ${MODSEC_WAF_CONF}/crs-setup.conf"
+        fi
+        if [ -d "${MODSEC_WAF_CONF}/rules" ]; then
+            echo "Include ${MODSEC_WAF_CONF}/rules/*.conf"
+        fi
+    } >"${MODSEC_WAF_CONF}/modsecurity.conf"
 
     # http 上下文指令单独成文件(主配置已 include conf.d/*.conf),不动模板
     cat >"${INSTALL_PATH}/conf/conf.d/modsecurity.conf" <<EOF
@@ -306,6 +444,18 @@ fi
 
 # ── 服务(修正模板中的硬编码路径,按实际安装目录生成) ────────────────────
 # 说明:若先配置过站点需额外测试 nginx -t;此处直接写精确路径。
+# 启动失败时把"真实原因"逐行打进日志 —— 光一句 start failed 没法排查。
+# 用 <<< 喂给 read 而不是管道:管道开着 pipefail 会引来 SIGPIPE(141)。
+nginx_diag() {   # nginx_diag <标题> <命令...>
+    local title="$1" out line
+    shift
+    out="$("$@" 2>&1)" || true
+    log_error "${title}"
+    while IFS= read -r line; do
+        [ -n "${line}" ] && log_error "    ${line}"
+    done <<<"${out}"
+}
+
 SVC_CMD=""
 if command -v systemctl >/dev/null 2>&1; then
     log_info "生成 systemd 服务 nginx.service(路径: ${INSTALL_PATH})"
@@ -315,14 +465,19 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload
     systemctl enable nginx.service >/dev/null 2>&1 || true
     if ! systemctl start nginx.service; then
-        log_error "systemctl start nginx 失败,执行 nginx -t 诊断:"
-        "${INSTALL_PATH}/sbin/nginx" -t || true
+        log_error "systemctl start nginx 失败。下面是三项自检输出(按此顺序看):"
+        nginx_diag "① 配置自检(nginx -t):" "${INSTALL_PATH}/sbin/nginx" -t
+        nginx_diag "② systemd 状态:" systemctl status nginx.service --no-pager -n 0
+        nginx_diag "③ 最近 15 行日志:" journalctl -u nginx.service --no-pager -n 15
     fi
     SVC_CMD="systemctl"
 else
     log_warn "未检测到 systemd,尝试 service nginx start"
     if command -v service >/dev/null 2>&1; then
-        service nginx start || true
+        if ! service nginx start; then
+            log_error "service nginx start 失败:"
+            nginx_diag "配置自检(nginx -t):" "${INSTALL_PATH}/sbin/nginx" -t
+        fi
         SVC_CMD="service"
     fi
 fi
@@ -356,6 +511,8 @@ sed -i "s|__INSTALL_PATH__|${INSTALL_PATH}|g" "${APP_PATH}/info.yaml"
 log_ok "nginx-${APP_VERSION} 安装完成(${INSTALL_PATH}),命令: ${SVC_CMD:-无} start/stop/restart"
 if [ -n "${SVC_CMD}" ] && command -v systemctl >/dev/null 2>&1; then
     if [ "$(systemctl is-active nginx.service)" != "active" ]; then
-        log_warn "nginx 服务当前未运行,请检查上方 nginx -t 输出"
+        log_warn "nginx 服务当前未运行:请看上方「三项自检」输出;也可手动执行"
+        log_warn "    ${INSTALL_PATH}/sbin/nginx -t"
+        log_warn "    systemctl status nginx.service"
     fi
 fi
