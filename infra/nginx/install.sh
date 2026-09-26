@@ -9,7 +9,12 @@
 #   * 覆盖常规模块:http ssl/v2/realip/addition/sub/dav/flv/mp4/gunzip/
 #     gzip_static/auth_request/random_index/secure_link/slice/stub_status,
 #     stream(含 ssl/ssl_preread/realip/slice)、threads、file-aio;
-#   * 兼容安装选项 options(动作 build):MODULES / EXTRA_CONFIG 追加到 configure;
+#   * 默认具备请求限速(http_limit_req)与并发限制(http_limit_conn):两者自 0.7.x
+#     起就是 nginx 默认模块(只有 --without- 反向开关),脚本会剔除任何关掉它们的
+#     参数,站点「安全」页的限速 / 并发能力始终可用;
+#   * 默认支持 IPv6:1.11.5 起默认编译(1.31.x 上 --with-ipv6 已废弃,传了只打
+#     告警),仅旧版本才显式补 --with-ipv6;
+#   * 兼容历史变量 MODULES / EXTRA_CONFIG(安装选项已移除,环境变量注入仍生效);
 #   * 修复 systemd 模板硬编码路径:按实际安装目录生成 nginx.service;
 #   * 登记 info.yaml(svc_name=nginx),Web 端「已安装」可启停/查看状态。
 #
@@ -322,8 +327,7 @@ configure_args=(
     --with-openssl-opt=no-async
 )
 
-# 安装选项(用户从 options 表单提交):MODULES(multiselect,空格分隔)/ EXTRA_CONFIG(string)
-# 追加到 configure 参数末尾
+# 历史安装选项(MODULES / EXTRA_CONFIG,表单已移除,环境变量注入仍兼容)
 if [ -n "${EXTRA_CONFIG:-}" ]; then
     read -r -a extra_args <<< "${EXTRA_CONFIG}"
     configure_args+=("${extra_args[@]}")
@@ -331,6 +335,28 @@ fi
 if [ -n "${MODULES:-}" ]; then
     read -r -a module_args <<< "${MODULES}"
     configure_args+=("${module_args[@]}")
+fi
+
+# ── 能力保障:请求限速 / 并发限制 / IPv6 ────────────────────────────────
+# limit_req / limit_conn 是 nginx 默认模块,只能 --without-* 关掉;站点「安全」
+# 页的请求限速与并发限制依赖它们,故剔除任何反向开关。
+kept_args=()
+for arg in "${configure_args[@]}"; do
+    case "${arg}" in
+        --without-http_limit_req_module|--without-http_limit_conn_module)
+            log_warn "忽略 ${arg}:站点限速 / 并发限制依赖该模块,已强制保留" ;;
+        *) kept_args+=("${arg}") ;;
+    esac
+done
+configure_args=("${kept_args[@]}")
+
+# IPv6:旧版本(仍支持该开关且未废弃)显式开启,新版靠默认编译,避免 deprecated 告警
+if grep -Eq '^[[:space:]]*--with-ipv6\)' auto/options \
+    && ! grep -A2 -E '^[[:space:]]*--with-ipv6\)' auto/options | grep -q 'deprecated'; then
+    configure_args+=(--with-ipv6)
+    log_info "显式开启 IPv6(--with-ipv6)"
+else
+    log_info "IPv6:由 nginx 默认编译支持(无需 --with-ipv6)"
 fi
 if [ "${WAF_ENABLED}" = "1" ]; then
     # --with-compat 是动态模块的前提(模块签名匹配),缺了它 load_module 会直接被拒

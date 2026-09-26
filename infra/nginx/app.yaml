@@ -35,22 +35,8 @@ options:
           value: 3.6.3
         - label: 4.0.1
           value: 4.0.1
-    - name: MODULES
-      label: 编译模块
-      type: multiselect
-      desc: 勾选需要额外编译进 Nginx 的模块（多个选项以空格拼接到 configure）
-      choices:
-        - label: http_limit_conn_module
-          value: --with-http_limit_conn_module
-        - label: IPv6
-          value: --with-ipv6
     - name: MODSECURITY
       label: ModSecurity(WAF)
       type: bool
       default: false
       desc: 编译 libmodsecurity 与 ModSecurity 动态模块,并部署 OWASP CRS 规则集(默认只记录不拦截)。动态模块只能在编译时加入,已装好的 nginx 无法后期加装
-    - name: EXTRA_CONFIG
-      label: 额外 configure 参数
-      type: string
-      placeholder: 如 --add-module=/path --with-debug
-      desc: 追加到 ./configure 的自定义参数（如第三方模块路径）
